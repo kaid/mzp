@@ -127,6 +127,34 @@ pub const ClientCapabilities = struct {
     sampling: ?SamplingCapability = null,
     elicitation: ?ElicitationCapability = null,
     experimental: ?json.Value = null,
+
+    pub fn jsonStringify(self: ClientCapabilities, jws: *json.Stringify) !void {
+        try jws.beginObject();
+        if (self.roots) |r| {
+            try jws.objectField("roots");
+            try jws.beginObject();
+            if (r.list_changed) {
+                try jws.objectField("listChanged");
+                try jws.write(true);
+            }
+            try jws.endObject();
+        }
+        if (self.sampling != null) {
+            try jws.objectField("sampling");
+            try jws.beginObject();
+            try jws.endObject();
+        }
+        if (self.elicitation != null) {
+            try jws.objectField("elicitation");
+            try jws.beginObject();
+            try jws.endObject();
+        }
+        if (self.experimental) |e| {
+            try jws.objectField("experimental");
+            try jws.write(e);
+        }
+        try jws.endObject();
+    }
 };
 
 pub const InitializeRequestParams = struct {
@@ -154,6 +182,80 @@ pub const InitializeResult = struct {
             try jws.write(i);
         }
         try jws.endObject();
+    }
+};
+
+pub const Root = struct {
+    uri: []const u8,
+    name: ?[]const u8 = null,
+
+    pub fn jsonStringify(self: Root, jws: *json.Stringify) !void {
+        try jws.beginObject();
+        try jws.objectField("uri");
+        try jws.write(self.uri);
+        if (self.name) |n| {
+            try jws.objectField("name");
+            try jws.write(n);
+        }
+        try jws.endObject();
+    }
+};
+
+/// Frees a root's strings (only valid if `uri` and `name` were allocator-owned).
+pub fn freeRoot(allocator: std.mem.Allocator, root: Root) void {
+    allocator.free(@constCast(root.uri));
+    if (root.name) |n| allocator.free(@constCast(n));
+}
+
+pub const ListRootsResult = struct {
+    roots: []const Root,
+
+    pub fn jsonStringify(self: ListRootsResult, jws: *json.Stringify) !void {
+        try jws.beginObject();
+        try jws.objectField("roots");
+        try jws.beginArray();
+        for (self.roots) |r| {
+            try r.jsonStringify(jws);
+        }
+        try jws.endArray();
+        try jws.endObject();
+    }
+};
+
+/// Handler-safe, allocator-owned roots list result.
+/// All slices inside this struct remain valid until `deinit()` is called.
+pub const OwnedListRootsResult = struct {
+    allocator: std.mem.Allocator,
+    roots: std.ArrayList(Root) = .empty,
+
+    pub fn init(allocator: std.mem.Allocator) OwnedListRootsResult {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *OwnedListRootsResult) void {
+        for (self.roots.items) |r| {
+            freeRoot(self.allocator, r);
+        }
+        self.roots.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    pub fn addRoot(self: *OwnedListRootsResult, uri: []const u8, name: ?[]const u8) !void {
+        const uri_duped = try self.allocator.dupe(u8, uri);
+        errdefer self.allocator.free(uri_duped);
+
+        const name_duped = if (name) |n| blk: {
+            const d = try self.allocator.dupe(u8, n);
+            break :blk d;
+        } else null;
+        errdefer if (name_duped) |n| self.allocator.free(n);
+
+        try self.roots.append(self.allocator, .{ .uri = uri_duped, .name = name_duped });
+    }
+
+    pub fn jsonStringify(self: OwnedListRootsResult, jws: *json.Stringify) !void {
+        const view = ListRootsResult{ .roots = self.roots.items };
+        try view.jsonStringify(jws);
     }
 };
 

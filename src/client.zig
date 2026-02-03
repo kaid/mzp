@@ -10,6 +10,7 @@ pub const Transport = transport_mod.Transport;
 pub const ClientOptions = struct {
     name: []const u8,
     version: []const u8,
+    capabilities: types.ClientCapabilities = .{},
 };
 
 pub const Client = struct {
@@ -24,6 +25,7 @@ pub const Client = struct {
     server_info_owned: bool = false,
     negotiated_version_owned: bool = false,
     server_instructions_owned: bool = false,
+    roots: std.ArrayList(types.Root) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, options: ClientOptions, transport: *Transport) Client {
         return .{
@@ -34,13 +36,17 @@ pub const Client = struct {
     }
 
     pub fn deinit(self: *Client) void {
+        for (self.roots.items) |r| {
+            types.freeRoot(self.allocator, r);
+        }
+        self.roots.deinit(self.allocator);
         self.clearServerState();
     }
 
     pub fn initialize(self: *Client) !types.InitializeResult {
         const params = .{
             .protocolVersion = types.LATEST_PROTOCOL_VERSION,
-            .capabilities = types.ClientCapabilities{},
+            .capabilities = self.options.capabilities,
             .clientInfo = types.Implementation{
                 .name = self.options.name,
                 .version = self.options.version,
@@ -132,6 +138,33 @@ pub const Client = struct {
         return try self.waitForResponse(id);
     }
 
+    /// Replaces the client's roots list (deep-copies strings).
+    /// If the client advertised `roots.listChanged` and is already initialized, sends `notifications/roots/list_changed`.
+    pub fn setRoots(self: *Client, roots: []const types.Root) !void {
+        for (self.roots.items) |r| {
+            types.freeRoot(self.allocator, r);
+        }
+        self.roots.clearRetainingCapacity();
+
+        for (roots) |r| {
+            const uri_duped = try self.allocator.dupe(u8, r.uri);
+            errdefer self.allocator.free(uri_duped);
+
+            const name_duped = if (r.name) |n| blk: {
+                const d = try self.allocator.dupe(u8, n);
+                break :blk d;
+            } else null;
+            errdefer if (name_duped) |n| self.allocator.free(n);
+
+            try self.roots.append(self.allocator, .{ .uri = uri_duped, .name = name_duped });
+        }
+
+        const roots_cap = self.options.capabilities.roots orelse return;
+        if (!roots_cap.list_changed) return;
+        if (self.negotiated_version == null) return;
+        try self.sendRootsListChanged();
+    }
+
     fn serializeParams(jws: *json.Stringify, params: anytype) !void {
         const T = @TypeOf(params);
         if (T == json.Value) {
@@ -203,9 +236,29 @@ pub const Client = struct {
                     }
                 },
                 .notification => {},
-                .request => {},
+                .request => |req| try self.handleIncomingRequest(req),
             }
         }
+    }
+
+    fn handleIncomingRequest(self: *Client, req: jsonrpc.Request) !void {
+        if (std.mem.eql(u8, req.method, "roots/list")) {
+            if (self.options.capabilities.roots == null) {
+                try self.sendError(jsonrpc.Error.methodNotFound(req.id, req.method));
+                return;
+            }
+            if (req.params) |p| {
+                if (p != .null) {
+                    try self.sendError(jsonrpc.Error.invalidParams(req.id, "roots/list takes no params"));
+                    return;
+                }
+            }
+            const result = types.ListRootsResult{ .roots = self.roots.items };
+            try self.sendResult(req.id, result);
+            return;
+        }
+
+        try self.sendError(jsonrpc.Error.methodNotFound(req.id, req.method));
     }
 
     fn sendNotificationRaw(self: *Client, method: []const u8, params: ?json.Value) !void {
@@ -229,7 +282,38 @@ pub const Client = struct {
     }
 
     pub fn sendRootsListChanged(self: *Client) !void {
+        const roots_cap = self.options.capabilities.roots orelse return;
+        if (!roots_cap.list_changed) return;
         try self.sendNotificationRaw("notifications/roots/list_changed", null);
+    }
+
+    fn sendResult(self: *Client, id: jsonrpc.RequestId, result: anytype) !void {
+        var aw: Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+
+        var jws: json.Stringify = .{ .writer = &aw.writer };
+        try jws.beginObject();
+        try jws.objectField("jsonrpc");
+        try jws.write("2.0");
+        try jws.objectField("id");
+        try id.jsonStringify(&jws);
+        try jws.objectField("result");
+        try result.jsonStringify(&jws);
+        try jws.endObject();
+
+        try aw.writer.flush();
+        try self.transport.write(aw.written());
+    }
+
+    fn sendError(self: *Client, err: jsonrpc.Error) !void {
+        var aw: Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+
+        var jws: json.Stringify = .{ .writer = &aw.writer };
+        try err.jsonStringify(&jws);
+
+        try aw.writer.flush();
+        try self.transport.write(aw.written());
     }
 
     fn clearServerState(self: *Client) void {
@@ -443,4 +527,89 @@ test "Client initialize parses server result" {
     const out = buffered.getOutput();
     try std.testing.expect(std.mem.indexOf(u8, out, "\"method\":\"initialize\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "notifications/initialized") != null);
+}
+
+test "Client initialize sends roots capability with listChanged" {
+    var buffered = transport_mod.BufferedTransport.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    try buffered.setInput(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"serverInfo\":{\"name\":\"srv\",\"version\":\"1.2.3\"}}}\n",
+    );
+
+    var client = Client.init(
+        std.testing.allocator,
+        .{
+            .name = "test-client",
+            .version = "1.0.0",
+            .capabilities = .{ .roots = .{ .list_changed = true } },
+        },
+        buffered.asTransport(),
+    );
+    defer client.deinit();
+
+    _ = try client.initialize();
+
+    const out = buffered.getOutput();
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"roots\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"listChanged\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "list_changed") == null);
+}
+
+test "Client responds to roots/list while waiting for response" {
+    var buffered = transport_mod.BufferedTransport.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    try buffered.setInput(
+        "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"roots/list\"}\n" ++
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n",
+    );
+
+    var client = Client.init(
+        std.testing.allocator,
+        .{
+            .name = "test-client",
+            .version = "1.0.0",
+            .capabilities = .{ .roots = .{} },
+        },
+        buffered.asTransport(),
+    );
+    defer client.deinit();
+
+    try client.setRoots(&[_]types.Root{
+        .{ .uri = "file:///repo", .name = "repo" },
+        .{ .uri = "file:///tmp" },
+    });
+
+    try client.ping();
+
+    const out = buffered.getOutput();
+    var it = std.mem.splitScalar(u8, out, '\n');
+    var saw_roots_result = false;
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        var parsed = try json.parseFromSlice(json.Value, std.testing.allocator, line, .{});
+        defer parsed.deinit();
+
+        const root_obj = switch (parsed.value) {
+            .object => |o| o,
+            else => continue,
+        };
+        const id_val = root_obj.get("id") orelse continue;
+        if (id_val != .integer or id_val.integer != 99) continue;
+
+        const result_val = root_obj.get("result") orelse return error.UnexpectedToken;
+        const result_obj = switch (result_val) {
+            .object => |o| o,
+            else => return error.UnexpectedToken,
+        };
+        const roots_val = result_obj.get("roots") orelse return error.UnexpectedToken;
+        const roots_arr = switch (roots_val) {
+            .array => |a| a,
+            else => return error.UnexpectedToken,
+        };
+        try std.testing.expectEqual(@as(usize, 2), roots_arr.items.len);
+        saw_roots_result = true;
+    }
+    try std.testing.expect(saw_roots_result);
 }
