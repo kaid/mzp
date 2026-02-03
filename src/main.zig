@@ -18,7 +18,13 @@ pub fn main(init: std.process.Init) !void {
     );
     defer server.deinit();
 
-    const schema = std.json.Value{ .object = std.json.ObjectMap.init(allocator) };
+    const schema = .{
+        .type = "object",
+        .properties = .{
+            .message = .{ .type = "string" },
+        },
+        .required = &[_][]const u8{ "message" },
+    };
 
     try server.addTool(
         .{

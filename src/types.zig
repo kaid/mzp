@@ -1,5 +1,6 @@
 const std = @import("std");
 const json = std.json;
+const Io = std.Io;
 
 pub const LATEST_PROTOCOL_VERSION = "2025-11-25";
 pub const DEFAULT_NEGOTIATED_VERSION = "2025-03-26";
@@ -159,7 +160,17 @@ pub const InitializeResult = struct {
 pub const Tool = struct {
     name: []const u8,
     description: ?[]const u8 = null,
-    inputSchema: json.Value,
+    /// Serialized JSON for the tool's `inputSchema` (typically a JSON Schema object).
+    ///
+    /// This is stored as raw JSON so callers can construct schemas ergonomically using
+    /// Zig structs (or provide a JSON string), without needing to build `json.Value`
+    /// object graphs by hand.
+    inputSchemaJson: []const u8,
+    inputSchemaJsonOwned: bool = false,
+
+    pub fn deinit(self: Tool, allocator: std.mem.Allocator) void {
+        if (self.inputSchemaJsonOwned) allocator.free(@constCast(self.inputSchemaJson));
+    }
 
     pub fn jsonStringify(self: Tool, jws: *json.Stringify) !void {
         try jws.beginObject();
@@ -170,7 +181,9 @@ pub const Tool = struct {
             try jws.write(d);
         }
         try jws.objectField("inputSchema");
-        try jws.write(self.inputSchema);
+        try jws.beginWriteRaw();
+        try jws.writer.writeAll(self.inputSchemaJson);
+        jws.endWriteRaw();
         try jws.endObject();
     }
 };
@@ -194,6 +207,32 @@ pub const ListToolsResult = struct {
         try jws.endObject();
     }
 };
+
+pub fn stringifyJsonAlloc(allocator: std.mem.Allocator, value: anytype) ![]u8 {
+    var aw: Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+
+    var jws: json.Stringify = .{ .writer = &aw.writer };
+    try stringifyAnyJsonValue(&jws, value);
+
+    try aw.writer.flush();
+    const result = try allocator.dupe(u8, aw.written());
+    aw.deinit();
+    return result;
+}
+
+fn stringifyAnyJsonValue(jws: *json.Stringify, value: anytype) !void {
+    const T = @TypeOf(value);
+    const is_container = switch (@typeInfo(T)) {
+        .@"struct", .@"enum", .@"union", .@"opaque" => true,
+        else => false,
+    };
+    if (is_container and @hasDecl(T, "jsonStringify")) {
+        try value.jsonStringify(jws);
+    } else {
+        try jws.write(value);
+    }
+}
 
 pub const TextContent = struct {
     type: []const u8 = "text",

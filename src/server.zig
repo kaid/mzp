@@ -84,6 +84,13 @@ pub const Server = struct {
         if (self.client_info_owned) {
             if (self.client_info) |info| freeImplementation(self.allocator, info);
         }
+
+        {
+            var it = self.tools.valueIterator();
+            while (it.next()) |info| {
+                info.tool.deinit(self.allocator);
+            }
+        }
         self.tools.deinit();
         self.resources.deinit();
         self.prompts.deinit();
@@ -91,10 +98,38 @@ pub const Server = struct {
 
     pub fn addTool(
         self: *Server,
-        tool: types.Tool,
+        tool: anytype,
         handler: ToolHandler,
     ) !void {
-        try self.tools.put(tool.name, .{ .tool = tool, .handler = handler });
+        const T = @TypeOf(tool);
+
+        if (!@hasField(T, "name")) @compileError("addTool: tool must have a `name` field");
+        const name: []const u8 = tool.name;
+
+        const description: ?[]const u8 = if (@hasField(T, "description")) tool.description else null;
+
+        const schema_json: []u8 = if (@hasField(T, "inputSchemaJson")) blk: {
+            const s: []const u8 = tool.inputSchemaJson;
+            break :blk try self.allocator.dupe(u8, s);
+        } else if (@hasField(T, "inputSchema")) blk: {
+            const S = @TypeOf(tool.inputSchema);
+            if (S == []const u8 or S == []u8) {
+                break :blk try self.allocator.dupe(u8, tool.inputSchema);
+            }
+            break :blk try types.stringifyJsonAlloc(self.allocator, tool.inputSchema);
+        } else {
+            @compileError("addTool: tool must have `inputSchema` (any JSON-serializable value) or `inputSchemaJson` ([]const u8) field");
+        };
+
+        try self.tools.put(name, .{
+            .tool = .{
+                .name = name,
+                .description = description,
+                .inputSchemaJson = schema_json,
+                .inputSchemaJsonOwned = true,
+            },
+            .handler = handler,
+        });
     }
 
     pub fn addResource(
@@ -563,4 +598,109 @@ test "Server handle initialize" {
     try std.testing.expect(output.len > 0);
     try std.testing.expect(std.mem.indexOf(u8, output, "protocolVersion") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "test-server") != null);
+}
+
+test "Server tools/list includes inputSchema" {
+    var buffered = transport_mod.BufferedTransport.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    var server = Server.init(
+        std.testing.allocator,
+        .{ .name = "test-server", .version = "1.0.0" },
+        buffered.asTransport(),
+    );
+    defer server.deinit();
+
+    const schema = .{
+        .type = "object",
+        .properties = .{
+            .message = .{ .type = "string" },
+        },
+        .required = &[_][]const u8{ "message" },
+    };
+
+    try server.addTool(.{
+        .name = "echo",
+        .description = "Echo",
+        .inputSchema = schema,
+    }, struct {
+        fn handler(_: []const u8, _: ?json.Value, allocator: std.mem.Allocator) anyerror!types.OwnedCallToolResult {
+            var result = types.OwnedCallToolResult.init(allocator);
+            try result.addText("ok");
+            return result;
+        }
+    }.handler);
+
+    try buffered.setInput("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n");
+
+    const msg = try buffered.asTransport().read(std.testing.allocator) orelse unreachable;
+    defer jsonrpc.Message.freeMessage(std.testing.allocator, msg);
+
+    try server.handleMessage(msg);
+
+    const output = buffered.getOutput();
+    const nl = std.mem.indexOfScalar(u8, output, '\n') orelse output.len;
+    const line = output[0..nl];
+
+    var parsed = try json.parseFromSlice(json.Value, std.testing.allocator, line, .{});
+    defer parsed.deinit();
+
+    const root_obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return error.UnexpectedToken,
+    };
+    const result_val = root_obj.get("result") orelse return error.UnexpectedToken;
+    const result_obj = switch (result_val) {
+        .object => |o| o,
+        else => return error.UnexpectedToken,
+    };
+    const tools_val = result_obj.get("tools") orelse return error.UnexpectedToken;
+    const tools_arr = switch (tools_val) {
+        .array => |a| a,
+        else => return error.UnexpectedToken,
+    };
+    try std.testing.expectEqual(@as(usize, 1), tools_arr.items.len);
+
+    const tool0_obj = switch (tools_arr.items[0]) {
+        .object => |o| o,
+        else => return error.UnexpectedToken,
+    };
+    const schema_val = tool0_obj.get("inputSchema") orelse return error.UnexpectedToken;
+    const schema_obj = switch (schema_val) {
+        .object => |o| o,
+        else => return error.UnexpectedToken,
+    };
+
+    const type_val = schema_obj.get("type") orelse return error.UnexpectedToken;
+    try std.testing.expectEqualStrings("object", switch (type_val) {
+        .string => |s| s,
+        else => return error.UnexpectedToken,
+    });
+
+    const props_val = schema_obj.get("properties") orelse return error.UnexpectedToken;
+    const props_obj = switch (props_val) {
+        .object => |o| o,
+        else => return error.UnexpectedToken,
+    };
+    const msg_val = props_obj.get("message") orelse return error.UnexpectedToken;
+    const msg_obj = switch (msg_val) {
+        .object => |o| o,
+        else => return error.UnexpectedToken,
+    };
+    const msg_type_val = msg_obj.get("type") orelse return error.UnexpectedToken;
+    try std.testing.expectEqualStrings("string", switch (msg_type_val) {
+        .string => |s| s,
+        else => return error.UnexpectedToken,
+    });
+
+    const required_val = schema_obj.get("required") orelse return error.UnexpectedToken;
+    const required_arr = switch (required_val) {
+        .array => |a| a,
+        else => return error.UnexpectedToken,
+    };
+    try std.testing.expect(required_arr.items.len >= 1);
+    try std.testing.expectEqualStrings("message", switch (required_arr.items[0]) {
+        .string => |s| s,
+        else => return error.UnexpectedToken,
+    });
 }
