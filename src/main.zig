@@ -26,7 +26,7 @@ pub fn main(init: std.process.Init) !void {
         .required = &[_][]const u8{ "message" },
     };
 
-    try server.addTool(
+    try server.capabilities.tools.add(
         .{
             .name = "echo",
             .description = "Echoes back the input",
@@ -39,8 +39,11 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn echoHandler(
+    _: ?*anyopaque,
     _: []const u8,
     arguments: ?std.json.Value,
+    _: mzp.server.ToolCallMeta,
+    _: mzp.server.CancellationToken,
     allocator: std.mem.Allocator,
 ) !mzp.types.OwnedCallToolResult {
     const text = if (arguments) |args| blk: {

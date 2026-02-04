@@ -51,6 +51,39 @@ pub const ToolsCapability = struct {
     list_changed: bool = false,
 };
 
+pub const TasksRequestsCapability = struct {
+    /// Whether the peer supports task-augmented `tools/call` requests.
+    tools_call: bool = false,
+};
+
+pub const TasksCapability = struct {
+    list: bool = false,
+    cancel: bool = false,
+    requests: ?TasksRequestsCapability = null,
+
+    pub fn jsonStringify(self: TasksCapability, jws: *json.Stringify) !void {
+        try jws.beginObject();
+        if (self.list) {
+            try jws.objectField("list");
+            try jws.write(true);
+        }
+        if (self.cancel) {
+            try jws.objectField("cancel");
+            try jws.write(true);
+        }
+        if (self.requests) |r| {
+            try jws.objectField("requests");
+            try jws.beginObject();
+            if (r.tools_call) {
+                try jws.objectField("tools/call");
+                try jws.write(true);
+            }
+            try jws.endObject();
+        }
+        try jws.endObject();
+    }
+};
+
 pub const LoggingCapability = struct {};
 
 pub const CompletionsCapability = struct {};
@@ -59,6 +92,7 @@ pub const ServerCapabilities = struct {
     prompts: ?PromptsCapability = null,
     resources: ?ResourcesCapability = null,
     tools: ?ToolsCapability = null,
+    tasks: ?TasksCapability = null,
     logging: ?LoggingCapability = null,
     completions: ?CompletionsCapability = null,
     experimental: ?json.Value = null,
@@ -96,6 +130,10 @@ pub const ServerCapabilities = struct {
             }
             try jws.endObject();
         }
+        if (self.tasks) |t| {
+            try jws.objectField("tasks");
+            try t.jsonStringify(jws);
+        }
         if (self.logging != null) {
             try jws.objectField("logging");
             try jws.beginObject();
@@ -126,6 +164,7 @@ pub const ClientCapabilities = struct {
     roots: ?RootsCapability = null,
     sampling: ?SamplingCapability = null,
     elicitation: ?ElicitationCapability = null,
+    tasks: ?TasksCapability = null,
     experimental: ?json.Value = null,
 
     pub fn jsonStringify(self: ClientCapabilities, jws: *json.Stringify) !void {
@@ -148,6 +187,10 @@ pub const ClientCapabilities = struct {
             try jws.objectField("elicitation");
             try jws.beginObject();
             try jws.endObject();
+        }
+        if (self.tasks) |t| {
+            try jws.objectField("tasks");
+            try t.jsonStringify(jws);
         }
         if (self.experimental) |e| {
             try jws.objectField("experimental");
@@ -830,11 +873,20 @@ pub const LoggingMessageParams = struct {
     }
 };
 
+pub const ProgressToken = union(enum) {
+    string: []const u8,
+    number: i64,
+
+    pub fn jsonStringify(self: ProgressToken, jws: *json.Stringify) !void {
+        switch (self) {
+            .string => |s| try jws.write(s),
+            .number => |n| try jws.write(n),
+        }
+    }
+};
+
 pub const ProgressParams = struct {
-    progressToken: union(enum) {
-        string: []const u8,
-        number: i64,
-    },
+    progressToken: ProgressToken,
     progress: f64,
     total: ?f64 = null,
     message: ?[]const u8 = null,
@@ -842,10 +894,7 @@ pub const ProgressParams = struct {
     pub fn jsonStringify(self: ProgressParams, jws: *json.Stringify) !void {
         try jws.beginObject();
         try jws.objectField("progressToken");
-        switch (self.progressToken) {
-            .string => |s| try jws.write(s),
-            .number => |n| try jws.write(n),
-        }
+        try self.progressToken.jsonStringify(jws);
         try jws.objectField("progress");
         try jws.write(self.progress);
         if (self.total) |t| {
@@ -856,6 +905,119 @@ pub const ProgressParams = struct {
             try jws.objectField("message");
             try jws.write(m);
         }
+        try jws.endObject();
+    }
+};
+
+pub const TaskStatus = enum {
+    queued,
+    running,
+    completed,
+    failed,
+    cancelled,
+
+    pub fn jsonStringify(self: TaskStatus, jws: *json.Stringify) !void {
+        try jws.write(@tagName(self));
+    }
+};
+
+pub const TaskMetadata = struct {
+    ttl: ?u64 = null,
+    pollInterval: ?u64 = null,
+
+    pub fn jsonStringify(self: TaskMetadata, jws: *json.Stringify) !void {
+        try jws.beginObject();
+        if (self.ttl) |ttl| {
+            try jws.objectField("ttl");
+            try jws.write(ttl);
+        }
+        if (self.pollInterval) |pi| {
+            try jws.objectField("pollInterval");
+            try jws.write(pi);
+        }
+        try jws.endObject();
+    }
+};
+
+pub const Task = struct {
+    id: []const u8,
+    status: TaskStatus,
+    createdAt: []const u8,
+    updatedAt: []const u8,
+    statusMessage: ?[]const u8 = null,
+    metadata: ?TaskMetadata = null,
+
+    pub fn jsonStringify(self: Task, jws: *json.Stringify) !void {
+        try jws.beginObject();
+        try jws.objectField("id");
+        try jws.write(self.id);
+        try jws.objectField("status");
+        try self.status.jsonStringify(jws);
+        try jws.objectField("createdAt");
+        try jws.write(self.createdAt);
+        try jws.objectField("updatedAt");
+        try jws.write(self.updatedAt);
+        if (self.statusMessage) |m| {
+            try jws.objectField("statusMessage");
+            try jws.write(m);
+        }
+        if (self.metadata) |md| {
+            try jws.objectField("metadata");
+            try md.jsonStringify(jws);
+        }
+        try jws.endObject();
+    }
+};
+
+pub const CreateTaskResult = struct {
+    task: Task,
+
+    pub fn jsonStringify(self: CreateTaskResult, jws: *json.Stringify) !void {
+        try jws.beginObject();
+        try jws.objectField("task");
+        try self.task.jsonStringify(jws);
+        try jws.endObject();
+    }
+};
+
+pub const GetTaskResult = struct {
+    task: Task,
+
+    pub fn jsonStringify(self: GetTaskResult, jws: *json.Stringify) !void {
+        try jws.beginObject();
+        try jws.objectField("task");
+        try self.task.jsonStringify(jws);
+        try jws.endObject();
+    }
+};
+
+pub const ListTasksResult = struct {
+    tasks: []const Task,
+    nextCursor: ?[]const u8 = null,
+
+    pub fn jsonStringify(self: ListTasksResult, jws: *json.Stringify) !void {
+        try jws.beginObject();
+        try jws.objectField("tasks");
+        try jws.beginArray();
+        for (self.tasks) |t| {
+            try t.jsonStringify(jws);
+        }
+        try jws.endArray();
+        if (self.nextCursor) |c| {
+            try jws.objectField("nextCursor");
+            try jws.write(c);
+        }
+        try jws.endObject();
+    }
+};
+
+pub const TaskStatusNotificationParams = struct {
+    task: Task,
+
+    pub fn jsonStringify(self: TaskStatusNotificationParams, jws: *json.Stringify) !void {
+        try jws.beginObject();
+        try jws.objectField("task");
+        try self.task.jsonStringify(jws);
         try jws.endObject();
     }
 };
