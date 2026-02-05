@@ -7,6 +7,14 @@ pub fn main(init: std.process.Init) !void {
     var stdio = mzp.StdioTransport.init(allocator);
     defer stdio.deinit();
 
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .stack_size = 1024 * 1024,
+        .argv0 = .init(init.minimal.args),
+        .environ = init.minimal.environ,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
     var server = mzp.Server.init(
         allocator,
         .{
@@ -23,7 +31,7 @@ pub fn main(init: std.process.Init) !void {
         .properties = .{
             .message = .{ .type = "string" },
         },
-        .required = &[_][]const u8{ "message" },
+        .required = &[_][]const u8{"message"},
     };
 
     try server.capabilities.tools.add(
@@ -35,7 +43,7 @@ pub fn main(init: std.process.Init) !void {
         echoHandler,
     );
 
-    try server.run();
+    try server.run(io);
 }
 
 fn echoHandler(

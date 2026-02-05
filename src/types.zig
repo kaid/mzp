@@ -4,6 +4,8 @@ const Io = std.Io;
 
 pub const LATEST_PROTOCOL_VERSION = "2025-11-25";
 pub const DEFAULT_NEGOTIATED_VERSION = "2025-03-26";
+/// Minimum protocolVersion that supports MCP `tasks/*` and task-augmented `tools/call`.
+pub const TASKS_MIN_PROTOCOL_VERSION = "2025-11-25";
 
 pub const Role = enum {
     user,
@@ -54,6 +56,19 @@ pub const ToolsCapability = struct {
 pub const TasksRequestsCapability = struct {
     /// Whether the peer supports task-augmented `tools/call` requests.
     tools_call: bool = false,
+
+    pub fn jsonStringify(self: TasksRequestsCapability, jws: *json.Stringify) !void {
+        try jws.beginObject();
+        if (self.tools_call) {
+            try jws.objectField("tools");
+            try jws.beginObject();
+            try jws.objectField("call");
+            try jws.beginObject();
+            try jws.endObject();
+            try jws.endObject();
+        }
+        try jws.endObject();
+    }
 };
 
 pub const TasksCapability = struct {
@@ -65,20 +80,17 @@ pub const TasksCapability = struct {
         try jws.beginObject();
         if (self.list) {
             try jws.objectField("list");
-            try jws.write(true);
+            try jws.beginObject();
+            try jws.endObject();
         }
         if (self.cancel) {
             try jws.objectField("cancel");
-            try jws.write(true);
+            try jws.beginObject();
+            try jws.endObject();
         }
         if (self.requests) |r| {
             try jws.objectField("requests");
-            try jws.beginObject();
-            if (r.tools_call) {
-                try jws.objectField("tools/call");
-                try jws.write(true);
-            }
-            try jws.endObject();
+            try r.jsonStringify(jws);
         }
         try jws.endObject();
     }
@@ -847,6 +859,17 @@ pub const LoggingLevel = enum {
     }
 };
 
+pub const LoggingSetLevelParams = struct {
+    level: LoggingLevel,
+
+    pub fn jsonStringify(self: LoggingSetLevelParams, jws: *json.Stringify) !void {
+        try jws.beginObject();
+        try jws.objectField("level");
+        try self.level.jsonStringify(jws);
+        try jws.endObject();
+    }
+};
+
 pub const EmptyResult = struct {
     pub fn jsonStringify(_: EmptyResult, jws: *json.Stringify) !void {
         try jws.beginObject();
@@ -912,12 +935,20 @@ pub const ProgressParams = struct {
 pub const TaskStatus = enum {
     queued,
     running,
+    input_required,
     completed,
     failed,
     cancelled,
 
     pub fn jsonStringify(self: TaskStatus, jws: *json.Stringify) !void {
-        try jws.write(@tagName(self));
+        const s: []const u8 = switch (self) {
+            .queued, .running => "working",
+            .input_required => "input_required",
+            .completed => "completed",
+            .failed => "failed",
+            .cancelled => "cancelled",
+        };
+        try jws.write(s);
     }
 };
 
@@ -949,21 +980,34 @@ pub const Task = struct {
 
     pub fn jsonStringify(self: Task, jws: *json.Stringify) !void {
         try jws.beginObject();
-        try jws.objectField("id");
+        // MCP schema (protocolVersion 2025-11-25): taskId + lastUpdatedAt + ttl.
+        try jws.objectField("taskId");
         try jws.write(self.id);
         try jws.objectField("status");
         try self.status.jsonStringify(jws);
         try jws.objectField("createdAt");
         try jws.write(self.createdAt);
-        try jws.objectField("updatedAt");
+        try jws.objectField("lastUpdatedAt");
         try jws.write(self.updatedAt);
+        try jws.objectField("ttl");
+        if (self.metadata) |md| {
+            if (md.ttl) |ttl| {
+                try jws.write(ttl);
+            } else {
+                try jws.write(null);
+            }
+        } else {
+            try jws.write(null);
+        }
+        if (self.metadata) |md| {
+            if (md.pollInterval) |pi| {
+                try jws.objectField("pollInterval");
+                try jws.write(pi);
+            }
+        }
         if (self.statusMessage) |m| {
             try jws.objectField("statusMessage");
             try jws.write(m);
-        }
-        if (self.metadata) |md| {
-            try jws.objectField("metadata");
-            try md.jsonStringify(jws);
         }
         try jws.endObject();
     }
@@ -973,17 +1017,6 @@ pub const CreateTaskResult = struct {
     task: Task,
 
     pub fn jsonStringify(self: CreateTaskResult, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("task");
-        try self.task.jsonStringify(jws);
-        try jws.endObject();
-    }
-};
-
-pub const GetTaskResult = struct {
-    task: Task,
-
-    pub fn jsonStringify(self: GetTaskResult, jws: *json.Stringify) !void {
         try jws.beginObject();
         try jws.objectField("task");
         try self.task.jsonStringify(jws);
@@ -1011,17 +1044,6 @@ pub const ListTasksResult = struct {
     }
 };
 
-pub const TaskStatusNotificationParams = struct {
-    task: Task,
-
-    pub fn jsonStringify(self: TaskStatusNotificationParams, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("task");
-        try self.task.jsonStringify(jws);
-        try jws.endObject();
-    }
-};
-
 test "ServerCapabilities stringify" {
     const caps = ServerCapabilities{
         .tools = .{ .list_changed = true },
@@ -1036,4 +1058,71 @@ test "ServerCapabilities stringify" {
 
     try aw.writer.flush();
     try std.testing.expect(aw.written().len > 0);
+}
+
+test "TasksCapability stringify uses nested objects" {
+    const caps = ServerCapabilities{
+        .tasks = .{
+            .list = true,
+            .cancel = true,
+            .requests = .{ .tools_call = true },
+        },
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    var jws: json.Stringify = .{ .writer = &aw.writer };
+    try caps.jsonStringify(&jws);
+    try aw.writer.flush();
+
+    const out = aw.written();
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"tasks\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"requests\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"list\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"cancel\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"tools\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"call\"") != null);
+}
+
+test "Task stringify uses taskId/lastUpdatedAt and includes ttl" {
+    const task = Task{
+        .id = "task-1",
+        .status = .running,
+        .createdAt = "2026-02-05T00:00:00Z",
+        .updatedAt = "2026-02-05T00:00:01Z",
+        .metadata = .{ .ttl = null, .pollInterval = 500 },
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    var jws: json.Stringify = .{ .writer = &aw.writer };
+    try task.jsonStringify(&jws);
+    try aw.writer.flush();
+
+    const out = aw.written();
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"taskId\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"lastUpdatedAt\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"ttl\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"pollInterval\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"working\"") != null);
+}
+
+test "Task stringify omits pollInterval when null" {
+    const task = Task{
+        .id = "task-1",
+        .status = .running,
+        .createdAt = "2026-02-05T00:00:00Z",
+        .updatedAt = "2026-02-05T00:00:01Z",
+        .metadata = .{ .ttl = 60000, .pollInterval = null },
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    var jws: json.Stringify = .{ .writer = &aw.writer };
+    try task.jsonStringify(&jws);
+    try aw.writer.flush();
+
+    const out = aw.written();
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"pollInterval\"") == null);
 }

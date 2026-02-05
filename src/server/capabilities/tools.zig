@@ -3,6 +3,7 @@ const json = std.json;
 const jsonrpc = @import("../../jsonrpc.zig");
 const types = @import("../../types.zig");
 const common = @import("../common.zig");
+const cancellation_mod = @import("../cancellation.zig");
 const tasks_mod = @import("tasks.zig");
 
 pub const Capability = struct {
@@ -111,19 +112,10 @@ pub const Capability = struct {
             },
         };
 
-        if (!tasks.enabled) {
-            try server.sendError(jsonrpc.Error.invalidParams(req.id, "Tasks disabled"));
-            return;
-        }
-
         const task_md = tasks_mod.parseTaskMetadata(params_obj) catch {
             try server.sendError(jsonrpc.Error.invalidParams(req.id, "Invalid task metadata"));
             return;
         };
-        if (task_md == null) {
-            try server.sendError(jsonrpc.Error.invalidParams(req.id, "tools/call requires params.task (tasks-only mode)"));
-            return;
-        }
 
         const name_val = params_obj.get("name") orelse {
             try server.sendError(jsonrpc.Error.invalidParams(req.id, "Missing name"));
@@ -147,21 +139,43 @@ pub const Capability = struct {
         var meta = parseToolCallMeta(params_obj);
         meta.task = task_md;
 
-        try tasks.ensureWorkersStarted();
-        const task_rec = try tasks.createTask(task_md.?);
-        const created_task = task_rec.task;
+        // tasks mode: only used when tasks are enabled and the client provided params.task.
+        if (tasks.enabled and task_md != null) {
+            try tasks.ensureWorkersStarted();
+            const task_rec = try tasks.createTask(task_md.?);
+            const created_task = task_rec.task;
 
-        try server.sendResult(req.id, types.CreateTaskResult{ .task = created_task });
-        try server.sendNotification("notifications/tasks/status", types.TaskStatusNotificationParams{ .task = created_task });
+            try server.sendResult(req.id, types.CreateTaskResult{ .task = created_task });
+            try server.sendNotification("notifications/tasks/status", created_task);
 
-        try tasks.enqueueToolJob(
-            tool_info.handler,
-            tool_info.user_data,
-            name,
-            arguments,
-            meta,
-            task_rec,
-        );
+            try tasks.enqueueToolJob(
+                tool_info.handler,
+                tool_info.user_data,
+                name,
+                arguments,
+                meta,
+                task_rec,
+            );
+            return;
+        }
+
+        // synchronous mode: tasks are disabled or the client did not provide params.task.
+        var active: @TypeOf(server.*).ActiveRequest = .{ .id = req.id };
+        cancellation_mod.registerActiveRequest(server, &active);
+        defer cancellation_mod.unregisterActiveRequest(server, &active);
+
+        const cancel = common.CancellationToken{ .cancelled = &active.cancelled };
+        const a = server.getAllocator();
+
+        var result = tool_info.handler(tool_info.user_data, name, arguments, meta, cancel, a) catch |err| blk: {
+            var error_result = types.OwnedCallToolResult.init(a);
+            error_result.isError = true;
+            error_result.addText(@errorName(err)) catch {};
+            break :blk error_result;
+        };
+        defer result.deinit();
+
+        try server.sendResult(req.id, result);
     }
 
     pub fn handleNotification(self: *Capability, server: anytype, notif: jsonrpc.Notification) !void {

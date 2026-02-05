@@ -3,23 +3,12 @@ const json = std.json;
 const jsonrpc = @import("../../jsonrpc.zig");
 const types = @import("../../types.zig");
 
-pub const LegacyHandler = *const fn (
-    name: []const u8,
-    arguments: ?json.ObjectMap,
-    allocator: std.mem.Allocator,
-) anyerror!types.OwnedGetPromptResult;
-
 pub const HandlerWithUserData = *const fn (
     user_data: ?*anyopaque,
     name: []const u8,
     arguments: ?json.ObjectMap,
     allocator: std.mem.Allocator,
 ) anyerror!types.OwnedGetPromptResult;
-
-pub const HandlerVariant = union(enum) {
-    legacy: LegacyHandler,
-    with_user_data: HandlerWithUserData,
-};
 
 pub const Capability = struct {
     allocator: std.mem.Allocator,
@@ -28,8 +17,8 @@ pub const Capability = struct {
 
     pub const PromptInfo = struct {
         prompt: types.Prompt,
-        handler: HandlerVariant,
-        user_data: ?*anyopaque = null,
+        handler: HandlerWithUserData,
+        user_data: ?*anyopaque,
     };
 
     pub fn init(allocator: std.mem.Allocator, default_user_data: ?*anyopaque) Capability {
@@ -49,13 +38,6 @@ pub const Capability = struct {
         return self.prompts.count();
     }
 
-    pub fn add(self: *Capability, prompt: types.Prompt, handler: LegacyHandler) !void {
-        try self.prompts.put(prompt.name, .{
-            .prompt = prompt,
-            .handler = .{ .legacy = handler },
-        });
-    }
-
     pub fn addWithUserData(
         self: *Capability,
         prompt: types.Prompt,
@@ -64,9 +46,13 @@ pub const Capability = struct {
     ) !void {
         try self.prompts.put(prompt.name, .{
             .prompt = prompt,
-            .handler = .{ .with_user_data = handler },
+            .handler = handler,
             .user_data = user_data orelse self.default_user_data,
         });
+    }
+
+    pub fn add(self: *Capability, prompt: types.Prompt, handler: HandlerWithUserData) !void {
+        return self.addWithUserData(prompt, handler, null);
     }
 
     pub fn handleList(self: *Capability, server: anytype, req: jsonrpc.Request) !void {
@@ -121,10 +107,7 @@ pub const Capability = struct {
             else => null,
         } else null;
 
-        var result = switch (prompt_info.handler) {
-            .legacy => |h| h(name, arguments, self.allocator),
-            .with_user_data => |h| h(prompt_info.user_data, name, arguments, self.allocator),
-        } catch |err| {
+        var result = prompt_info.handler(prompt_info.user_data, name, arguments, self.allocator) catch |err| {
             try server.sendError(jsonrpc.Error.internalError(req.id, @errorName(err)));
             return;
         };

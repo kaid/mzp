@@ -6,6 +6,7 @@ const transport_mod = @import("../transport.zig");
 const common = @import("common.zig");
 const cancellation_mod = @import("cancellation.zig");
 const cascade_mod = @import("capabilities/Cascade.zig");
+const pending_mod = @import("../pending_registry.zig");
 const Io = std.Io;
 
 pub const Transport = transport_mod.Transport;
@@ -13,30 +14,6 @@ pub const Transport = transport_mod.Transport;
 pub const ToolHandler = common.ToolHandler;
 pub const ToolCallMeta = common.ToolCallMeta;
 pub const CancellationToken = common.CancellationToken;
-
-pub const ResourceHandler = *const fn (
-    uri: []const u8,
-    allocator: std.mem.Allocator,
-) anyerror!types.OwnedReadResourceResult;
-
-pub const ResourceHandlerWithUserData = *const fn (
-    user_data: ?*anyopaque,
-    uri: []const u8,
-    allocator: std.mem.Allocator,
-) anyerror!types.OwnedReadResourceResult;
-
-pub const PromptHandler = *const fn (
-    name: []const u8,
-    arguments: ?json.ObjectMap,
-    allocator: std.mem.Allocator,
-) anyerror!types.OwnedGetPromptResult;
-
-pub const PromptHandlerWithUserData = *const fn (
-    user_data: ?*anyopaque,
-    name: []const u8,
-    arguments: ?json.ObjectMap,
-    allocator: std.mem.Allocator,
-) anyerror!types.OwnedGetPromptResult;
 
 pub const NotificationHandler = *const fn (
     user_data: ?*anyopaque,
@@ -50,6 +27,13 @@ pub const ServerOptions = struct {
     title: ?[]const u8 = null,
     description: ?[]const u8 = null,
     instructions: ?[]const u8 = null,
+    /// Enables MCP logging (`logging/*` and `notifications/message`).
+    enable_logging: bool = true,
+    /// Minimum log level used before a client requests `logging/setLevel`.
+    default_log_level: types.LoggingLevel = .info,
+    /// Default timeout for outbound requests initiated by this server.
+    /// If null, requests wait indefinitely unless a per-call timeout is provided.
+    default_timeout: ?std.Io.Clock.Duration = null,
     user_data: ?*anyopaque = null,
     on_notification: ?NotificationHandler = null,
     /// Enables MCP `tasks/*` and task-augmented `tools/call` requests.
@@ -79,12 +63,23 @@ pub const Server = struct {
     negotiated_version: []const u8 = types.DEFAULT_NEGOTIATED_VERSION,
     negotiated_version_owned: ?[]u8 = null,
     client_info_owned: bool = false,
-    next_request_id: i64 = 1,
+    next_request_id: std.atomic.Value(i64) = std.atomic.Value(i64).init(1),
     user_data: ?*anyopaque = null,
     on_notification: ?NotificationHandler = null,
+    min_log_level: std.atomic.Value(u8),
 
     ts_allocator: std.heap.ThreadSafeAllocator,
-    io_mutex: std.Thread.Mutex = .{},
+    io: ?std.Io = null,
+    io_mutex: std.Io.Mutex = .init,
+
+    inbound_queue: std.Io.Queue(*jsonrpc.Message) = undefined,
+    inbound_buf: [128]*jsonrpc.Message = undefined,
+    run_group: std.Io.Group = .init,
+
+    pending: pending_mod.PendingRegistry = undefined,
+    pending_inited: bool = false,
+    run_error_mutex: std.Thread.Mutex = .{},
+    run_error: ?anyerror = null,
 
     active_requests_mutex: std.Thread.Mutex = .{},
     active_requests: std.ArrayList(*ActiveRequest) = .empty,
@@ -99,6 +94,7 @@ pub const Server = struct {
             .transport = transport,
             .user_data = options.user_data,
             .on_notification = options.on_notification,
+            .min_log_level = std.atomic.Value(u8).init(@intFromEnum(options.default_log_level)),
             .ts_allocator = .{ .child_allocator = allocator },
             .capabilities = cascade_mod.Cascade.init(
                 allocator,
@@ -120,6 +116,7 @@ pub const Server = struct {
         self.capabilities.deinit();
 
         self.active_requests.deinit(self.allocator);
+        if (self.pending_inited) self.pending.deinit();
     }
 
     pub fn getAllocator(self: *Server) std.mem.Allocator {
@@ -142,25 +139,127 @@ pub const Server = struct {
 
     fn notifyTaskStatus(ctx: *anyopaque, task: types.Task) void {
         const self: *Server = @ptrCast(@alignCast(ctx));
-        self.sendNotification("notifications/tasks/status", types.TaskStatusNotificationParams{ .task = task }) catch {};
+        self.sendNotification("notifications/tasks/status", task) catch {};
     }
 
-    pub fn run(self: *Server) !void {
+    pub fn run(self: *Server, io: std.Io) anyerror!void {
         self.attachCapabilities();
 
-        while (true) {
-            const msg = try self.transport.read(self.getAllocator()) orelse break;
+        self.io = io;
+        if (!self.pending_inited) {
+            self.pending = pending_mod.PendingRegistry.init(self.getAllocator());
+            self.pending_inited = true;
+        }
+        self.run_error_mutex.lock();
+        self.run_error = null;
+        self.run_error_mutex.unlock();
 
-            defer jsonrpc.Message.freeMessage(self.getAllocator(), msg);
-            try self.handleMessage(msg);
+        self.inbound_queue = std.Io.Queue(*jsonrpc.Message).init(self.inbound_buf[0..]);
+        self.run_group = .init;
+
+        try self.run_group.concurrent(io, readerMain, .{ self });
+        try self.run_group.concurrent(io, dispatcherMain, .{ self });
+
+        try self.run_group.await(io);
+
+        self.run_error_mutex.lock();
+        const err = self.run_error;
+        self.run_error_mutex.unlock();
+        if (err) |e| return e;
+    }
+
+    fn setRunError(self: *Server, err: anyerror) void {
+        self.run_error_mutex.lock();
+        defer self.run_error_mutex.unlock();
+        if (self.run_error == null) self.run_error = err;
+    }
+
+    fn readerMain(self: *Server) void {
+        const io = self.io orelse return;
+        const a = self.getAllocator();
+
+        while (true) {
+            const msg_opt = self.transport.read(io, a) catch |err| {
+                self.pending.notifyConnectionClosed(io);
+                self.inbound_queue.close(io);
+                self.setRunError(err);
+                return;
+            };
+            var msg = msg_opt orelse {
+                self.pending.notifyConnectionClosed(io);
+                self.inbound_queue.close(io);
+                return;
+            };
+
+            switch (msg) {
+                .response => |*resp| {
+                    const id = pending_mod.PendingRegistry.borrowedIdFromRequestId(resp.id);
+                    const result = resp.result;
+                    resp.result = .null;
+                    self.pending.fulfillResult(io, id, result);
+                    jsonrpc.Message.freeMessage(a, msg);
+                },
+                .@"error" => |*err_resp| {
+                    if (err_resp.id) |rid| {
+                        const id = pending_mod.PendingRegistry.borrowedIdFromRequestId(rid);
+                        self.pending.fulfillFailed(io, id);
+                    }
+                    jsonrpc.Message.freeMessage(a, msg);
+                },
+                .request, .notification => {
+                    const msg_ptr = a.create(jsonrpc.Message) catch |err| {
+                        jsonrpc.Message.freeMessage(a, msg);
+                        self.pending.notifyConnectionClosed(io);
+                        self.inbound_queue.close(io);
+                        self.setRunError(err);
+                        return;
+                    };
+                    msg_ptr.* = msg;
+                    self.inbound_queue.putOne(io, msg_ptr) catch |err| switch (err) {
+                        error.Closed, error.Canceled => {
+                            jsonrpc.Message.freeMessage(a, msg_ptr.*);
+                            a.destroy(msg_ptr);
+                            return;
+                        },
+                    };
+                },
+            }
+        }
+    }
+
+    fn dispatcherMain(self: *Server) void {
+        const io = self.io orelse return;
+        const a = self.getAllocator();
+
+        while (true) {
+            const msg_ptr = self.inbound_queue.getOne(io) catch |err| switch (err) {
+                error.Closed, error.Canceled => return,
+            };
+            defer a.destroy(msg_ptr);
+
+            self.handleMessage(msg_ptr.*) catch |err| {
+                jsonrpc.Message.freeMessage(a, msg_ptr.*);
+                self.setRunError(err);
+                self.pending.notifyConnectionClosed(io);
+                self.inbound_queue.close(io);
+                return;
+            };
+            jsonrpc.Message.freeMessage(a, msg_ptr.*);
         }
     }
 
     /// Sends `roots/list` to the connected client and returns the client's current roots.
     /// Caller owns the returned value and must call `deinit()`.
     pub fn listRoots(self: *Server) !types.OwnedListRootsResult {
-        const result_value = try self.sendRequest("roots/list", null);
-        defer jsonrpc.Message.freeValue(self.allocator, result_value);
+        const result_value = try self.requestClient("roots/list", null, null);
+        defer jsonrpc.Message.freeValue(self.getAllocator(), result_value);
+        return try self.parseListRootsResult(result_value);
+    }
+
+    /// Like `listRoots` but allows overriding the timeout for this call.
+    pub fn listRootsWithTimeout(self: *Server, timeout: ?Io.Clock.Duration) !types.OwnedListRootsResult {
+        const result_value = try self.requestClient("roots/list", null, timeout);
+        defer jsonrpc.Message.freeValue(self.getAllocator(), result_value);
         return try self.parseListRootsResult(result_value);
     }
 
@@ -179,6 +278,8 @@ pub const Server = struct {
             try self.handleInitialize(req);
         } else if (std.mem.eql(u8, req.method, "ping")) {
             try self.handlePing(req);
+        } else if (std.mem.eql(u8, req.method, "logging/setLevel")) {
+            try self.handleLoggingSetLevel(req);
         } else if (try self.capabilities.handleRequest(self, req)) {
             // handled by a capability
         } else {
@@ -312,11 +413,71 @@ pub const Server = struct {
         return result;
     }
 
-    fn sendRequest(self: *Server, method: []const u8, params: anytype) !json.Value {
-        const id = self.next_request_id;
-        self.next_request_id += 1;
+    pub fn newNumericId(self: *Server) jsonrpc.RequestId {
+        return .{ .number = self.next_request_id.fetchAdd(1, .monotonic) };
+    }
 
+    fn sendRequest(self: *Server, method: []const u8, params: anytype) !json.Value {
+        const id = self.newNumericId();
+        return self.sendRequestWithIdTimeout(id, method, params, null);
+    }
+
+    fn effectiveTimeout(self: *Server, timeout: ?Io.Clock.Duration) ?Io.Clock.Duration {
+        return timeout orelse self.options.default_timeout;
+    }
+
+    /// Sends a JSON-RPC request to the connected client.
+    /// If `timeout` is null, uses `options.default_timeout`.
+    pub fn requestClient(self: *Server, method: []const u8, params: anytype, timeout: ?Io.Clock.Duration) !json.Value {
+        const id = self.newNumericId();
+        return self.sendRequestWithIdTimeout(id, method, params, timeout);
+    }
+
+    fn sendCancelledNotification(self: *Server, id: jsonrpc.RequestId) void {
+        const io = self.io orelse return;
         var aw: Io.Writer.Allocating = .init(self.getAllocator());
+        defer aw.deinit();
+
+        var jws: json.Stringify = .{ .writer = &aw.writer };
+        jws.beginObject() catch return;
+        jws.objectField("jsonrpc") catch return;
+        jws.write("2.0") catch return;
+        jws.objectField("method") catch return;
+        jws.write("notifications/cancelled") catch return;
+        jws.objectField("params") catch return;
+        jws.beginObject() catch return;
+        jws.objectField("requestId") catch return;
+        id.jsonStringify(&jws) catch return;
+        jws.endObject() catch return;
+        jws.endObject() catch return;
+
+        aw.writer.flush() catch return;
+        self.io_mutex.lockUncancelable(io);
+        defer self.io_mutex.unlock(io);
+        _ = self.transport.write(io, aw.written()) catch {};
+    }
+
+    fn waitSharedPending(sp: *pending_mod.PendingRegistry.SharedPending, io: Io) (std.Io.QueueClosedError || std.Io.Cancelable)!pending_mod.PendingRegistry.Outcome {
+        return sp.pending.wait(io);
+    }
+
+    fn sleepDuration(d: Io.Clock.Duration, io: Io) Io.SleepError!void {
+        return d.sleep(io);
+    }
+
+    fn sendRequestWithIdTimeout(self: *Server, id: jsonrpc.RequestId, method: []const u8, params: anytype, timeout: ?Io.Clock.Duration) !json.Value {
+        const io = self.io orelse return error.IoNotSet;
+        const a = self.getAllocator();
+        if (!self.pending_inited) {
+            self.pending = pending_mod.PendingRegistry.init(a);
+            self.pending_inited = true;
+        }
+        const borrowed_id = pending_mod.PendingRegistry.borrowedIdFromRequestId(id);
+        const shared = try self.pending.register(io, borrowed_id);
+        defer shared.release(a, io);
+        errdefer self.pending.abandon(io, borrowed_id);
+
+        var aw: Io.Writer.Allocating = .init(a);
         defer aw.deinit();
 
         var jws: json.Stringify = .{ .writer = &aw.writer };
@@ -324,7 +485,7 @@ pub const Server = struct {
         try jws.objectField("jsonrpc");
         try jws.write("2.0");
         try jws.objectField("id");
-        try jws.write(id);
+        try id.jsonStringify(&jws);
         try jws.objectField("method");
         try jws.write(method);
         if (@TypeOf(params) != @TypeOf(null)) {
@@ -334,11 +495,52 @@ pub const Server = struct {
         try jws.endObject();
 
         try aw.writer.flush();
-        self.io_mutex.lock();
-        defer self.io_mutex.unlock();
-        try self.transport.write(aw.written());
+        self.io_mutex.lockUncancelable(io);
+        {
+            defer self.io_mutex.unlock(io);
+            try self.transport.write(io, aw.written());
+        }
 
-        return try self.waitForResponse(id);
+        const eff_timeout = self.effectiveTimeout(timeout);
+        const outcome = if (eff_timeout) |t| blk: {
+            var wait_future = try Io.concurrent(io, waitSharedPending, .{ shared, io });
+            errdefer {
+                _ = wait_future.cancel(io) catch {};
+            }
+            var sleep_future = try Io.concurrent(io, sleepDuration, .{ t, io });
+            errdefer {
+                _ = sleep_future.cancel(io) catch {};
+            }
+
+            const selected = try Io.select(io, .{ .resp = &wait_future, .timeout = &sleep_future });
+            switch (selected) {
+                .resp => |res| {
+                    _ = sleep_future.cancel(io) catch {};
+                    break :blk try res;
+                },
+                .timeout => |sleep_res| {
+                    try sleep_res;
+                    const wait_res = wait_future.cancel(io);
+                    if (wait_res) |o| {
+                        break :blk o;
+                    } else |err| switch (err) {
+                        error.Canceled => {
+                            self.sendCancelledNotification(id);
+                            return error.RequestTimeout;
+                        },
+                        error.Closed => return error.ConnectionClosed,
+                    }
+                },
+            }
+        } else blk: {
+            break :blk try shared.pending.wait(io);
+        };
+
+        return switch (outcome) {
+            .result => |v| v,
+            .failed => error.RequestFailed,
+            .connection_closed => error.ConnectionClosed,
+        };
     }
 
     fn serializeParams(jws: *json.Stringify, params: anytype) !void {
@@ -385,43 +587,58 @@ pub const Server = struct {
         }
     }
 
-    fn waitForResponse(self: *Server, expected_id: i64) !json.Value {
-        while (true) {
-            var msg = try self.transport.read(self.allocator) orelse return error.ConnectionClosed;
-            defer jsonrpc.Message.freeMessage(self.allocator, msg);
-
-            switch (msg) {
-                .response => |*resp| {
-                    const matches = switch (resp.id) {
-                        .number => |n| n == expected_id,
-                        .string => false,
-                    };
-                    if (matches) {
-                        const result = resp.result;
-                        resp.result = .null; // transfer ownership to caller
-                        return result;
-                    }
-                },
-                .@"error" => |err| {
-                    if (err.id) |resp_id| {
-                        const matches = switch (resp_id) {
-                            .number => |n| n == expected_id,
-                            .string => false,
-                        };
-                        if (matches) return error.RequestFailed;
-                    }
-                },
-                .notification => |notif| try self.handleNotification(notif),
-                .request => |req| try self.handleRequest(req),
-            }
-        }
-    }
-
     fn handlePing(self: *Server, req: jsonrpc.Request) !void {
         try self.sendResult(req.id, types.EmptyResult{});
     }
 
+    pub fn getMinLogLevel(self: *Server) types.LoggingLevel {
+        return @enumFromInt(self.min_log_level.load(.monotonic));
+    }
+
+    pub fn setMinLogLevel(self: *Server, level: types.LoggingLevel) void {
+        self.min_log_level.store(@intFromEnum(level), .monotonic);
+    }
+
+    fn handleLoggingSetLevel(self: *Server, req: jsonrpc.Request) !void {
+        if (!self.options.enable_logging) {
+            try self.sendError(jsonrpc.Error.methodNotFound(req.id, req.method));
+            return;
+        }
+
+        const params = req.params orelse {
+            try self.sendError(jsonrpc.Error.invalidParams(req.id, "Missing params"));
+            return;
+        };
+        const obj = switch (params) {
+            .object => |o| o,
+            else => {
+                try self.sendError(jsonrpc.Error.invalidParams(req.id, "Params must be an object"));
+                return;
+            },
+        };
+        const level_val = obj.get("level") orelse {
+            try self.sendError(jsonrpc.Error.invalidParams(req.id, "Missing params.level"));
+            return;
+        };
+        const level_str = switch (level_val) {
+            .string => |s| s,
+            else => {
+                try self.sendError(jsonrpc.Error.invalidParams(req.id, "params.level must be a string"));
+                return;
+            },
+        };
+
+        const level = std.meta.stringToEnum(types.LoggingLevel, level_str) orelse {
+            try self.sendError(jsonrpc.Error.invalidParams(req.id, "Unknown log level"));
+            return;
+        };
+
+        self.setMinLogLevel(level);
+        try self.sendResult(req.id, types.EmptyResult{});
+    }
+
     pub fn sendResult(self: *Server, id: jsonrpc.RequestId, result: anytype) !void {
+        const io = self.io orelse return error.IoNotSet;
         var aw: Io.Writer.Allocating = .init(self.getAllocator());
         defer aw.deinit();
 
@@ -436,16 +653,25 @@ pub const Server = struct {
         try jws.endObject();
 
         try aw.writer.flush();
-        self.io_mutex.lock();
-        defer self.io_mutex.unlock();
-        try self.transport.write(aw.written());
+        self.io_mutex.lockUncancelable(io);
+        defer self.io_mutex.unlock(io);
+        try self.transport.write(io, aw.written());
     }
 
     fn getCapabilities(self: *Server) types.ServerCapabilities {
-        return self.capabilities.advertise();
+        var caps = self.capabilities.advertise();
+        if (std.mem.order(u8, self.negotiated_version, types.TASKS_MIN_PROTOCOL_VERSION) == .lt) {
+            // Avoid advertising tasks to hosts validating older schemas.
+            caps.tasks = null;
+        }
+        if (self.options.enable_logging) {
+            caps.logging = .{};
+        }
+        return caps;
     }
 
     pub fn sendError(self: *Server, err: jsonrpc.Error) !void {
+        const io = self.io orelse return error.IoNotSet;
         var aw: Io.Writer.Allocating = .init(self.getAllocator());
         defer aw.deinit();
 
@@ -453,9 +679,9 @@ pub const Server = struct {
         try err.jsonStringify(&jws);
 
         try aw.writer.flush();
-        self.io_mutex.lock();
-        defer self.io_mutex.unlock();
-        try self.transport.write(aw.written());
+        self.io_mutex.lockUncancelable(io);
+        defer self.io_mutex.unlock(io);
+        try self.transport.write(io, aw.written());
     }
 
     fn getBool(obj: json.ObjectMap, key: []const u8) bool {
@@ -467,6 +693,7 @@ pub const Server = struct {
     }
 
     pub fn sendNotification(self: *Server, method: []const u8, params: anytype) !void {
+        const io = self.io orelse return error.IoNotSet;
         var aw: Io.Writer.Allocating = .init(self.getAllocator());
         defer aw.deinit();
 
@@ -481,12 +708,23 @@ pub const Server = struct {
         try jws.endObject();
 
         try aw.writer.flush();
-        self.io_mutex.lock();
-        defer self.io_mutex.unlock();
-        try self.transport.write(aw.written());
+        self.io_mutex.lockUncancelable(io);
+        defer self.io_mutex.unlock(io);
+        try self.transport.write(io, aw.written());
     }
 
     pub fn sendLogMessage(self: *Server, level: types.LoggingLevel, data: json.Value, logger: ?[]const u8) !void {
+        if (!self.options.enable_logging) return;
+        if (@intFromEnum(level) < self.min_log_level.load(.monotonic)) return;
+        try self.sendNotification("notifications/message", types.LoggingMessageParams{
+            .level = level,
+            .logger = logger,
+            .data = data,
+        });
+    }
+
+    pub fn sendLogMessageRaw(self: *Server, level: types.LoggingLevel, data: json.Value, logger: ?[]const u8) !void {
+        if (!self.options.enable_logging) return;
         try self.sendNotification("notifications/message", types.LoggingMessageParams{
             .level = level,
             .logger = logger,
@@ -564,7 +802,31 @@ pub const Server = struct {
     }
 };
 
+const TestIo = struct {
+    threaded: std.Io.Threaded,
+    io: std.Io,
+
+    pub fn init(self: *TestIo, allocator: std.mem.Allocator) void {
+        self.threaded = std.Io.Threaded.init(allocator, .{
+            .stack_size = 1024 * 1024,
+            .argv0 = std.Io.Threaded.Argv0.empty,
+            .environ = std.process.Environ.empty,
+        });
+        self.io = self.threaded.io();
+    }
+
+    pub fn deinit(self: *TestIo) void {
+        self.threaded.deinit();
+        self.* = undefined;
+    }
+};
+
 test "Server tool handler with user_data" {
+    var tio: TestIo = undefined;
+    tio.init(std.testing.allocator);
+    defer tio.deinit();
+    const io = tio.io;
+
     var buffered = transport_mod.BufferedTransport.init(std.testing.allocator);
     defer buffered.deinit();
 
@@ -574,6 +836,7 @@ test "Server tool handler with user_data" {
         buffered.asTransport(),
     );
     defer server.deinit();
+    server.io = io;
 
     const Ctx = struct {
         prefix: []const u8,
@@ -597,7 +860,7 @@ test "Server tool handler with user_data" {
 
     try buffered.setInput("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"echo\",\"task\":{}}}\n");
 
-    const msg = try buffered.asTransport().read(std.testing.allocator) orelse unreachable;
+    const msg = try buffered.asTransport().read(io, std.testing.allocator) orelse unreachable;
     defer jsonrpc.Message.freeMessage(std.testing.allocator, msg);
     try server.handleMessage(msg);
 
@@ -608,7 +871,12 @@ test "Server tool handler with user_data" {
     try std.testing.expect(ctx.saw.load(.acquire));
 }
 
-test "Server tool handler receives tools/call _meta.progressToken" {
+test "Server tools/call runs synchronously when params.task is absent" {
+    var tio: TestIo = undefined;
+    tio.init(std.testing.allocator);
+    defer tio.deinit();
+    const io = tio.io;
+
     var buffered = transport_mod.BufferedTransport.init(std.testing.allocator);
     defer buffered.deinit();
 
@@ -618,6 +886,52 @@ test "Server tool handler receives tools/call _meta.progressToken" {
         buffered.asTransport(),
     );
     defer server.deinit();
+    server.io = io;
+
+    var saw = std.atomic.Value(bool).init(false);
+
+    try server.capabilities.tools.addWithUserData(.{
+        .name = "echo",
+        .description = "Echo",
+        .inputSchema = .{ .type = "object" },
+    }, struct {
+        fn handler(user_data: ?*anyopaque, _: []const u8, _: ?json.Value, _: ToolCallMeta, _: CancellationToken, allocator: std.mem.Allocator) anyerror!types.OwnedCallToolResult {
+            const flag: *std.atomic.Value(bool) = @ptrCast(@alignCast(user_data.?));
+            flag.store(true, .release);
+            var result = types.OwnedCallToolResult.init(allocator);
+            try result.addText("sync");
+            return result;
+        }
+    }.handler, &saw);
+
+    try buffered.setInput("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"echo\"}}\n");
+
+    const msg = try buffered.asTransport().read(io, std.testing.allocator) orelse unreachable;
+    defer jsonrpc.Message.freeMessage(std.testing.allocator, msg);
+    try server.handleMessage(msg);
+
+    try std.testing.expect(saw.load(.acquire));
+    const output = buffered.getOutput();
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"result\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "sync") != null);
+}
+
+test "Server tool handler receives tools/call _meta.progressToken" {
+    var tio: TestIo = undefined;
+    tio.init(std.testing.allocator);
+    defer tio.deinit();
+    const io = tio.io;
+
+    var buffered = transport_mod.BufferedTransport.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    var server = Server.init(
+        std.testing.allocator,
+        .{ .name = "test-server", .version = "1.0.0" },
+        buffered.asTransport(),
+    );
+    defer server.deinit();
+    server.io = io;
 
     var saw = std.atomic.Value(bool).init(false);
 
@@ -650,7 +964,7 @@ test "Server tool handler receives tools/call _meta.progressToken" {
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"echo\",\"task\":{},\"_meta\":{\"progressToken\":\"tok\"}}}\n",
     );
 
-    const msg = try buffered.asTransport().read(std.testing.allocator) orelse unreachable;
+    const msg = try buffered.asTransport().read(io, std.testing.allocator) orelse unreachable;
     defer jsonrpc.Message.freeMessage(std.testing.allocator, msg);
     try server.handleMessage(msg);
 
@@ -662,6 +976,11 @@ test "Server tool handler receives tools/call _meta.progressToken" {
 }
 
 test "Server marks active request cancelled via notifications/cancelled" {
+    var tio: TestIo = undefined;
+    tio.init(std.testing.allocator);
+    defer tio.deinit();
+    _ = tio.io;
+
     var buffered = transport_mod.BufferedTransport.init(std.testing.allocator);
     defer buffered.deinit();
 
@@ -685,6 +1004,11 @@ test "Server marks active request cancelled via notifications/cancelled" {
 }
 
 test "Server on_notification hook fires" {
+    var tio: TestIo = undefined;
+    tio.init(std.testing.allocator);
+    defer tio.deinit();
+    const io = tio.io;
+
     var buffered = transport_mod.BufferedTransport.init(std.testing.allocator);
     defer buffered.deinit();
 
@@ -709,10 +1033,11 @@ test "Server on_notification hook fires" {
         buffered.asTransport(),
     );
     defer server.deinit();
+    server.io = io;
 
     try buffered.setInput("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/roots/list_changed\"}\n");
 
-    const msg = try buffered.asTransport().read(std.testing.allocator) orelse unreachable;
+    const msg = try buffered.asTransport().read(io, std.testing.allocator) orelse unreachable;
     defer jsonrpc.Message.freeMessage(std.testing.allocator, msg);
     try server.handleMessage(msg);
 
@@ -720,6 +1045,11 @@ test "Server on_notification hook fires" {
 }
 
 test "Server init" {
+    var tio: TestIo = undefined;
+    tio.init(std.testing.allocator);
+    defer tio.deinit();
+    _ = tio.io;
+
     var buffered = transport_mod.BufferedTransport.init(std.testing.allocator);
     defer buffered.deinit();
 
@@ -734,6 +1064,11 @@ test "Server init" {
 }
 
 test "Server handle initialize" {
+    var tio: TestIo = undefined;
+    tio.init(std.testing.allocator);
+    defer tio.deinit();
+    const io = tio.io;
+
     var buffered = transport_mod.BufferedTransport.init(std.testing.allocator);
     defer buffered.deinit();
 
@@ -743,10 +1078,11 @@ test "Server handle initialize" {
         buffered.asTransport(),
     );
     defer server.deinit();
+    server.io = io;
 
     try buffered.setInput("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{\"roots\":{\"listChanged\":true}},\"clientInfo\":{\"name\":\"test\",\"version\":\"1.0\"}}}\n");
 
-    const msg = try buffered.asTransport().read(std.testing.allocator) orelse unreachable;
+    const msg = try buffered.asTransport().read(io, std.testing.allocator) orelse unreachable;
     defer jsonrpc.Message.freeMessage(std.testing.allocator, msg);
 
     try server.handleMessage(msg);
@@ -762,34 +1098,136 @@ test "Server handle initialize" {
 }
 
 test "Server roots/list sends request and parses response" {
-    var buffered = transport_mod.BufferedTransport.init(std.testing.allocator);
-    defer buffered.deinit();
+    var tio: TestIo = undefined;
+    tio.init(std.testing.allocator);
+    defer tio.deinit();
+    const io = tio.io;
+
+    var duplex: transport_mod.DuplexTransport = undefined;
+    duplex.init(std.testing.allocator);
+    defer duplex.deinit(io);
 
     var server = Server.init(
         std.testing.allocator,
         .{ .name = "test-server", .version = "1.0.0" },
-        buffered.asTransport(),
+        duplex.endpointA().asTransport(),
     );
     defer server.deinit();
+    server.io = io;
 
-    try buffered.setInput(
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"roots\":[{\"uri\":\"file:///repo\",\"name\":\"repo\"},{\"uri\":\"file:///tmp\"}]}}\n",
-    );
+    const FakeClient = struct {
+        fn run(ep: *transport_mod.DuplexTransport.Endpoint, io2: std.Io) !void {
+            const msg = (try ep.asTransport().read(io2, std.testing.allocator)) orelse return;
+            defer jsonrpc.Message.freeMessage(std.testing.allocator, msg);
+
+            const req = switch (msg) {
+                .request => |r| r,
+                else => return error.UnexpectedToken,
+            };
+            try std.testing.expectEqualStrings("roots/list", req.method);
+            const id_num = switch (req.id) {
+                .number => |n| n,
+                .string => return error.UnexpectedToken,
+            };
+
+            const response = try std.fmt.allocPrint(
+                std.testing.allocator,
+                "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{{\"roots\":[{{\"uri\":\"file:///repo\",\"name\":\"repo\"}},{{\"uri\":\"file:///tmp\"}}]}}}}",
+                .{id_num},
+            );
+            defer std.testing.allocator.free(response);
+
+            try ep.asTransport().write(io2, response);
+            ep.asTransport().close(io2);
+        }
+    };
+
+    var srv_future = try std.Io.concurrent(io, Server.run, .{ &server, io });
+    var cli_future = try std.Io.concurrent(io, FakeClient.run, .{ duplex.endpointB(), io });
 
     var roots = try server.listRoots();
     defer roots.deinit();
+
+    try cli_future.await(io);
+    try srv_future.await(io);
 
     try std.testing.expectEqual(@as(usize, 2), roots.roots.items.len);
     try std.testing.expectEqualStrings("file:///repo", roots.roots.items[0].uri);
     try std.testing.expect(roots.roots.items[0].name != null);
     try std.testing.expectEqualStrings("repo", roots.roots.items[0].name.?);
 
-    const out = buffered.getOutput();
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"method\":\"roots/list\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"params\"") == null);
+    // Client observed request by responding; server parsed roots.
 }
 
-test "Server tools/list includes inputSchema" {
+test "Server request timeout sends notifications/cancelled" {
+    var tio: TestIo = undefined;
+    tio.init(std.testing.allocator);
+    defer tio.deinit();
+    const io = tio.io;
+
+    var duplex: transport_mod.DuplexTransport = undefined;
+    duplex.init(std.testing.allocator);
+    defer duplex.deinit(io);
+
+    const timeout: Io.Clock.Duration = .{ .raw = Io.Duration.fromMilliseconds(10), .clock = .boot };
+
+    var server = Server.init(
+        std.testing.allocator,
+        .{ .name = "test-server", .version = "1.0.0", .default_timeout = timeout },
+        duplex.endpointA().asTransport(),
+    );
+    defer server.deinit();
+    server.io = io;
+
+    const FakeClient = struct {
+        fn run(ep: *transport_mod.DuplexTransport.Endpoint, io2: std.Io) !void {
+            const msg = (try ep.asTransport().read(io2, std.testing.allocator)) orelse return;
+            defer jsonrpc.Message.freeMessage(std.testing.allocator, msg);
+
+            const req = switch (msg) {
+                .request => |r| r,
+                else => return error.UnexpectedToken,
+            };
+            try std.testing.expectEqualStrings("roots/list", req.method);
+            const rid = req.id;
+
+            const cancel_msg = (try ep.asTransport().read(io2, std.testing.allocator)) orelse return;
+            defer jsonrpc.Message.freeMessage(std.testing.allocator, cancel_msg);
+            const notif = switch (cancel_msg) {
+                .notification => |n| n,
+                else => return error.UnexpectedToken,
+            };
+            try std.testing.expectEqualStrings("notifications/cancelled", notif.method);
+            const params = notif.params orelse return error.UnexpectedToken;
+            const obj = switch (params) {
+                .object => |o| o,
+                else => return error.UnexpectedToken,
+            };
+            const rid_val = obj.get("requestId") orelse return error.UnexpectedToken;
+            const got: jsonrpc.RequestId = switch (rid_val) {
+                .string => |s| .{ .string = s },
+                .integer => |n| .{ .number = n },
+                .number_string => |s| .{ .number = try std.fmt.parseInt(i64, s, 10) },
+                else => return error.UnexpectedToken,
+            };
+            try std.testing.expect(rid.eql(got));
+            ep.asTransport().close(io2);
+        }
+    };
+
+    var cli_future = try std.Io.concurrent(io, FakeClient.run, .{ duplex.endpointB(), io });
+
+    try std.testing.expectError(error.RequestTimeout, server.listRoots());
+
+    try cli_future.await(io);
+}
+
+test "Server tasks/get returns task fields directly" {
+    var tio: TestIo = undefined;
+    tio.init(std.testing.allocator);
+    defer tio.deinit();
+    const io = tio.io;
+
     var buffered = transport_mod.BufferedTransport.init(std.testing.allocator);
     defer buffered.deinit();
 
@@ -799,13 +1237,249 @@ test "Server tools/list includes inputSchema" {
         buffered.asTransport(),
     );
     defer server.deinit();
+    server.io = io;
+
+    _ = try server.capabilities.tasks.createTask(.{ .ttl = 60000, .pollInterval = null });
+
+    try buffered.setInput("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tasks/get\",\"params\":{\"taskId\":\"task-1\"}}\n");
+    const msg = try buffered.asTransport().read(io, std.testing.allocator) orelse unreachable;
+    defer jsonrpc.Message.freeMessage(std.testing.allocator, msg);
+    try server.handleMessage(msg);
+
+    const out = buffered.getOutput();
+    const nl = std.mem.indexOfScalar(u8, out, '\n') orelse return error.TestUnexpectedResult;
+    const out_msg = try jsonrpc.Message.parse(std.testing.allocator, out[0..nl]);
+    defer jsonrpc.Message.freeMessage(std.testing.allocator, out_msg);
+    try std.testing.expect(out_msg == .response);
+    const result_obj = switch (out_msg.response.result) {
+        .object => |o| o,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(result_obj.get("taskId") != null);
+    try std.testing.expect(result_obj.get("task") == null);
+}
+
+test "Server initialize advertises logging capability when enabled" {
+    var tio: TestIo = undefined;
+    tio.init(std.testing.allocator);
+    defer tio.deinit();
+    const io = tio.io;
+
+    var buffered = transport_mod.BufferedTransport.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    var server = Server.init(
+        std.testing.allocator,
+        .{ .name = "test-server", .version = "1.0.0", .enable_logging = true },
+        buffered.asTransport(),
+    );
+    defer server.deinit();
+    server.io = io;
+
+    try buffered.setInput("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1.0\"}}}\n");
+    const msg = try buffered.asTransport().read(io, std.testing.allocator) orelse unreachable;
+    defer jsonrpc.Message.freeMessage(std.testing.allocator, msg);
+    try server.handleMessage(msg);
+
+    const output = buffered.getOutput();
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"logging\":{}") != null);
+}
+
+test "Server initialize omits logging capability when disabled" {
+    var tio: TestIo = undefined;
+    tio.init(std.testing.allocator);
+    defer tio.deinit();
+    const io = tio.io;
+
+    var buffered = transport_mod.BufferedTransport.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    var server = Server.init(
+        std.testing.allocator,
+        .{ .name = "test-server", .version = "1.0.0", .enable_logging = false },
+        buffered.asTransport(),
+    );
+    defer server.deinit();
+    server.io = io;
+
+    try buffered.setInput("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1.0\"}}}\n");
+    const msg = try buffered.asTransport().read(io, std.testing.allocator) orelse unreachable;
+    defer jsonrpc.Message.freeMessage(std.testing.allocator, msg);
+    try server.handleMessage(msg);
+
+    const output = buffered.getOutput();
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"logging\"") == null);
+}
+
+test "Server initialize omits tasks capability for protocol versions before 2025-11-25" {
+    var tio: TestIo = undefined;
+    tio.init(std.testing.allocator);
+    defer tio.deinit();
+    const io = tio.io;
+
+    var buffered = transport_mod.BufferedTransport.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    var server = Server.init(
+        std.testing.allocator,
+        .{ .name = "test-server", .version = "1.0.0", .enable_tasks = true },
+        buffered.asTransport(),
+    );
+    defer server.deinit();
+    server.io = io;
+
+    try buffered.setInput("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1.0\"}}}\n");
+    const msg = try buffered.asTransport().read(io, std.testing.allocator) orelse unreachable;
+    defer jsonrpc.Message.freeMessage(std.testing.allocator, msg);
+    try server.handleMessage(msg);
+
+    const output = buffered.getOutput();
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"tasks\"") == null);
+}
+
+test "Server initialize advertises tasks capability for protocol version 2025-11-25" {
+    var tio: TestIo = undefined;
+    tio.init(std.testing.allocator);
+    defer tio.deinit();
+    const io = tio.io;
+
+    var buffered = transport_mod.BufferedTransport.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    var server = Server.init(
+        std.testing.allocator,
+        .{ .name = "test-server", .version = "1.0.0", .enable_tasks = true },
+        buffered.asTransport(),
+    );
+    defer server.deinit();
+    server.io = io;
+
+    try buffered.setInput("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1.0\"}}}\n");
+    const msg = try buffered.asTransport().read(io, std.testing.allocator) orelse unreachable;
+    defer jsonrpc.Message.freeMessage(std.testing.allocator, msg);
+    try server.handleMessage(msg);
+
+    const output = buffered.getOutput();
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"tasks\"") != null);
+}
+
+test "Server logging/setLevel updates min log level" {
+    var tio: TestIo = undefined;
+    tio.init(std.testing.allocator);
+    defer tio.deinit();
+    const io = tio.io;
+
+    var buffered = transport_mod.BufferedTransport.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    var server = Server.init(
+        std.testing.allocator,
+        .{ .name = "test-server", .version = "1.0.0", .enable_logging = true, .default_log_level = .info },
+        buffered.asTransport(),
+    );
+    defer server.deinit();
+    server.io = io;
+
+    try buffered.setInput("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"logging/setLevel\",\"params\":{\"level\":\"warning\"}}\n");
+    const msg = try buffered.asTransport().read(io, std.testing.allocator) orelse unreachable;
+    defer jsonrpc.Message.freeMessage(std.testing.allocator, msg);
+    try server.handleMessage(msg);
+
+    try std.testing.expectEqual(types.LoggingLevel.warning, server.getMinLogLevel());
+    const output = buffered.getOutput();
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"id\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"result\":{}") != null);
+}
+
+test "Server sendLogMessage filters below min level" {
+    var tio: TestIo = undefined;
+    tio.init(std.testing.allocator);
+    defer tio.deinit();
+    const io = tio.io;
+
+    var buffered = transport_mod.BufferedTransport.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    var server = Server.init(
+        std.testing.allocator,
+        .{ .name = "test-server", .version = "1.0.0", .enable_logging = true, .default_log_level = .warning },
+        buffered.asTransport(),
+    );
+    defer server.deinit();
+    server.io = io;
+
+    buffered.clearOutput();
+    try server.sendLogMessage(.info, .{ .string = "low" }, "test");
+    try std.testing.expectEqual(@as(usize, 0), buffered.getOutput().len);
+
+    try server.sendLogMessage(.@"error", .{ .string = "high" }, "test");
+    const output = buffered.getOutput();
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"method\":\"notifications/message\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"level\":\"error\"") != null);
+}
+
+test "Server notifications/tasks/status params are task fields directly" {
+    var tio: TestIo = undefined;
+    tio.init(std.testing.allocator);
+    defer tio.deinit();
+    const io = tio.io;
+
+    var buffered = transport_mod.BufferedTransport.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    var server = Server.init(
+        std.testing.allocator,
+        .{ .name = "test-server", .version = "1.0.0" },
+        buffered.asTransport(),
+    );
+    defer server.deinit();
+    server.io = io;
+
+    const task = types.Task{
+        .id = "task-1",
+        .status = .running,
+        .createdAt = "2026-02-05T00:00:00Z",
+        .updatedAt = "2026-02-05T00:00:01Z",
+        .metadata = .{ .ttl = 60000, .pollInterval = null },
+    };
+
+    try server.sendNotification("notifications/tasks/status", task);
+    const out = buffered.getOutput();
+    const nl = std.mem.indexOfScalar(u8, out, '\n') orelse return error.TestUnexpectedResult;
+    const out_msg = try jsonrpc.Message.parse(std.testing.allocator, out[0..nl]);
+    defer jsonrpc.Message.freeMessage(std.testing.allocator, out_msg);
+    try std.testing.expect(out_msg == .notification);
+    const params_obj = switch (out_msg.notification.params orelse return error.TestUnexpectedResult) {
+        .object => |o| o,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(params_obj.get("taskId") != null);
+    try std.testing.expect(params_obj.get("task") == null);
+}
+
+test "Server tools/list includes inputSchema" {
+    var tio: TestIo = undefined;
+    tio.init(std.testing.allocator);
+    defer tio.deinit();
+    const io = tio.io;
+
+    var buffered = transport_mod.BufferedTransport.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    var server = Server.init(
+        std.testing.allocator,
+        .{ .name = "test-server", .version = "1.0.0" },
+        buffered.asTransport(),
+    );
+    defer server.deinit();
+    server.io = io;
 
     const schema = .{
         .type = "object",
         .properties = .{
             .message = .{ .type = "string" },
         },
-        .required = &[_][]const u8{ "message" },
+        .required = &[_][]const u8{"message"},
     };
 
     try server.capabilities.tools.add(.{
@@ -822,7 +1496,7 @@ test "Server tools/list includes inputSchema" {
 
     try buffered.setInput("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n");
 
-    const msg = try buffered.asTransport().read(std.testing.allocator) orelse unreachable;
+    const msg = try buffered.asTransport().read(io, std.testing.allocator) orelse unreachable;
     defer jsonrpc.Message.freeMessage(std.testing.allocator, msg);
 
     try server.handleMessage(msg);

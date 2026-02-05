@@ -3,21 +3,11 @@ const json = std.json;
 const jsonrpc = @import("../../jsonrpc.zig");
 const types = @import("../../types.zig");
 
-pub const LegacyHandler = *const fn (
-    uri: []const u8,
-    allocator: std.mem.Allocator,
-) anyerror!types.OwnedReadResourceResult;
-
 pub const HandlerWithUserData = *const fn (
     user_data: ?*anyopaque,
     uri: []const u8,
     allocator: std.mem.Allocator,
 ) anyerror!types.OwnedReadResourceResult;
-
-pub const HandlerVariant = union(enum) {
-    legacy: LegacyHandler,
-    with_user_data: HandlerWithUserData,
-};
 
 pub const Capability = struct {
     allocator: std.mem.Allocator,
@@ -26,8 +16,8 @@ pub const Capability = struct {
 
     pub const ResourceInfo = struct {
         resource: types.Resource,
-        handler: HandlerVariant,
-        user_data: ?*anyopaque = null,
+        handler: HandlerWithUserData,
+        user_data: ?*anyopaque,
     };
 
     pub fn init(allocator: std.mem.Allocator, default_user_data: ?*anyopaque) Capability {
@@ -47,13 +37,6 @@ pub const Capability = struct {
         return self.resources.count();
     }
 
-    pub fn add(self: *Capability, resource: types.Resource, handler: LegacyHandler) !void {
-        try self.resources.put(resource.uri, .{
-            .resource = resource,
-            .handler = .{ .legacy = handler },
-        });
-    }
-
     pub fn addWithUserData(
         self: *Capability,
         resource: types.Resource,
@@ -62,9 +45,13 @@ pub const Capability = struct {
     ) !void {
         try self.resources.put(resource.uri, .{
             .resource = resource,
-            .handler = .{ .with_user_data = handler },
+            .handler = handler,
             .user_data = user_data orelse self.default_user_data,
         });
+    }
+
+    pub fn add(self: *Capability, resource: types.Resource, handler: HandlerWithUserData) !void {
+        return self.addWithUserData(resource, handler, null);
     }
 
     pub fn handleList(self: *Capability, server: anytype, req: jsonrpc.Request) !void {
@@ -113,10 +100,7 @@ pub const Capability = struct {
             return;
         };
 
-        var result = switch (resource_info.handler) {
-            .legacy => |h| h(uri, self.allocator),
-            .with_user_data => |h| h(resource_info.user_data, uri, self.allocator),
-        } catch |err| {
+        var result = resource_info.handler(resource_info.user_data, uri, self.allocator) catch |err| {
             try server.sendError(jsonrpc.Error.internalError(req.id, @errorName(err)));
             return;
         };

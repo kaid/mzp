@@ -141,6 +141,8 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    // Ensure the example executable compiles (Zig analysis is lazy; exe tests don't necessarily typecheck `main`).
+    test_step.dependOn(&exe.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

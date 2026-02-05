@@ -399,7 +399,8 @@ pub const Capability = struct {
             return;
         }
 
-        try server.sendResult(req.id, types.GetTaskResult{ .task = rec.?.task });
+        // MCP tasks/get returns the task object directly.
+        try server.sendResult(req.id, rec.?.task);
     }
 
     pub fn handleCancel(self: *Capability, server: anytype, req: jsonrpc.Request) !void {
@@ -449,9 +450,10 @@ pub const Capability = struct {
         self.tasks_mutex.unlock();
 
         if (!was_terminal) {
-            try server.sendNotification("notifications/tasks/status", types.TaskStatusNotificationParams{ .task = task_copy });
+            try server.sendNotification("notifications/tasks/status", task_copy);
         }
-        try server.sendResult(req.id, types.GetTaskResult{ .task = task_copy });
+        // MCP tasks/cancel returns the task object directly.
+        try server.sendResult(req.id, task_copy);
     }
 
     pub fn handleResult(self: *Capability, server: anytype, req: jsonrpc.Request) !void {
@@ -512,7 +514,7 @@ pub const Capability = struct {
             var obj_map = value.object;
 
             var related = json.ObjectMap.init(a);
-            try related.put("id", .{ .string = task_id.? });
+            try related.put("taskId", .{ .string = task_id.? });
 
             var meta_obj = if (obj_map.get("_meta")) |mv| switch (mv) {
                 .object => |o| o,
