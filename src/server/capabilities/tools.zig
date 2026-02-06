@@ -90,8 +90,7 @@ pub const Capability = struct {
             .tool = .{
                 .name = name,
                 .description = description,
-                .inputSchemaJson = schema.generate(Args),
-                .inputSchemaJsonOwned = false, // comptime string, no need to free
+                .inputSchema = schema.generate(Args),
             },
             .handler = Adapter.bridge,
             .user_data = user_data orelse self.default_user_data,
@@ -111,25 +110,21 @@ pub const Capability = struct {
 
         const description: ?[]const u8 = if (@hasField(T, "description")) tool.description else null;
 
-        const schema_json: []u8 = if (@hasField(T, "inputSchemaJson")) blk: {
-            const s: []const u8 = tool.inputSchemaJson;
-            break :blk try self.allocator.dupe(u8, s);
-        } else if (@hasField(T, "inputSchema")) blk: {
+        const input_schema: schema.JsonSchema = if (@hasField(T, "inputSchema")) blk: {
             const S = @TypeOf(tool.inputSchema);
-            if (S == []const u8 or S == []u8) {
-                break :blk try self.allocator.dupe(u8, tool.inputSchema);
+            if (S == schema.JsonSchema) {
+                break :blk tool.inputSchema;
             }
-            break :blk try types.stringifyJsonAlloc(self.allocator, tool.inputSchema);
+            @compileError("tools.add: `inputSchema` must be of type `schema.JsonSchema` when using standard registration");
         } else {
-            @compileError("tools.add: tool must have `inputSchema` (any JSON-serializable value) or `inputSchemaJson` ([]const u8) field");
+            @compileError("tools.add: tool must have `inputSchema` field of type `schema.JsonSchema` or use `addTyped` for automatic generation");
         };
 
         try self.tools.put(name, .{
             .tool = .{
                 .name = name,
                 .description = description,
-                .inputSchemaJson = schema_json,
-                .inputSchemaJsonOwned = true,
+                .inputSchema = input_schema,
             },
             .handler = handler,
             .user_data = user_data orelse self.default_user_data,

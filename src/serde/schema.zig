@@ -1,15 +1,57 @@
-/// JSON Schema generation from Zig types
-///
-/// Generates JSON Schema from Zig struct types at comptime.
-/// Used for auto-generating tool input schemas from handler argument types.
 const std = @import("std");
 
-/// Generate JSON Schema string from a Zig type at comptime
-pub fn generate(comptime T: type) []const u8 {
+pub const JsonSchema = struct {
+    type: []const u8,
+    properties: ?[]const Property = null,
+    required: ?[]const []const u8 = null,
+    items: ?*const JsonSchema = null,
+    @"enum": ?[]const []const u8 = null,
+
+    pub const Property = struct {
+        name: []const u8,
+        schema: JsonSchema,
+    };
+
+    pub fn jsonStringify(self: JsonSchema, jws: *std.json.Stringify) !void {
+        try jws.beginObject();
+        try jws.objectField("type");
+        try jws.write(self.type);
+
+        if (self.properties) |props| {
+            try jws.objectField("properties");
+            try jws.beginObject();
+            for (props) |prop| {
+                try jws.objectField(prop.name);
+                try prop.schema.jsonStringify(jws);
+            }
+            try jws.endObject();
+        }
+
+        if (self.required) |req| {
+            try jws.objectField("required");
+            try jws.write(req);
+        }
+
+        if (self.items) |it| {
+            try jws.objectField("items");
+            try it.jsonStringify(jws);
+        }
+
+        if (self.@"enum") |en| {
+            try jws.objectField("enum");
+            try jws.write(en);
+        }
+
+        try jws.endObject();
+    }
+};
+
+/// Generate JSON Schema struct from a Zig type at comptime
+pub fn generate(comptime T: type) JsonSchema {
     return comptime generateSchema(T);
 }
 
-fn generateSchema(comptime T: type) []const u8 {
+fn generateSchema(comptime T: type) JsonSchema {
     const info = @typeInfo(T);
 
     return switch (info) {
@@ -17,91 +59,87 @@ fn generateSchema(comptime T: type) []const u8 {
         .optional => |opt| generateSchema(opt.child),
         .pointer => |ptr| switch (ptr.size) {
             .slice => if (ptr.child == u8)
-                "{\"type\":\"string\"}"
+                JsonSchema{ .type = "string" }
             else
-                "{\"type\":\"array\",\"items\":" ++ generateSchema(ptr.child) ++ "}",
+                JsonSchema{
+                    .type = "array",
+                    .items = &generateSchema(ptr.child),
+                },
             else => @compileError("Unsupported pointer type for schema generation"),
         },
-        .array => |arr| "{\"type\":\"array\",\"items\":" ++ generateSchema(arr.child) ++ "}",
-        .int => "{\"type\":\"integer\"}",
-        .float => "{\"type\":\"number\"}",
-        .bool => "{\"type\":\"boolean\"}",
+        .array => |arr| JsonSchema{
+            .type = "array",
+            .items = &generateSchema(arr.child),
+        },
+        .int => JsonSchema{ .type = "integer" },
+        .float => JsonSchema{ .type = "number" },
+        .bool => JsonSchema{ .type = "boolean" },
         .@"enum" => generateEnumSchema(T),
         else => @compileError("Unsupported type for schema generation: " ++ @typeName(T)),
     };
 }
 
-fn generateObjectSchema(comptime T: type) []const u8 {
+fn generateObjectSchema(comptime T: type) JsonSchema {
     const fields = @typeInfo(T).@"struct".fields;
 
     if (fields.len == 0) {
-        return "{\"type\":\"object\",\"properties\":{}}";
+        return JsonSchema{ .type = "object", .properties = &[_]JsonSchema.Property{} };
     }
 
-    comptime var props: []const u8 = "";
-    comptime var required: []const u8 = "";
-    comptime var first_prop = true;
-    comptime var first_req = true;
+    comptime var props: []const JsonSchema.Property = &[_]JsonSchema.Property{};
+    comptime var required: []const []const u8 = &[_][]const u8{};
 
     inline for (fields) |field| {
-        // Field property
-        if (!first_prop) {
-            props = props ++ ",";
-        }
-        first_prop = false;
-
         const field_schema = generateSchema(field.type);
-        props = props ++ "\"" ++ field.name ++ "\":" ++ field_schema;
+        props = props ++ [_]JsonSchema.Property{.{ .name = field.name, .schema = field_schema }};
 
         // Required array (non-optional fields without defaults)
         const is_optional = @typeInfo(field.type) == .optional;
         const has_default = field.default_value_ptr != null;
 
         if (!is_optional and !has_default) {
-            if (!first_req) {
-                required = required ++ ",";
-            }
-            first_req = false;
-            required = required ++ "\"" ++ field.name ++ "\"";
+            required = required ++ [_][]const u8{field.name};
         }
     }
 
-    if (required.len > 0) {
-        return "{\"type\":\"object\",\"properties\":{" ++ props ++ "},\"required\":[" ++ required ++ "]}";
-    } else {
-        return "{\"type\":\"object\",\"properties\":{" ++ props ++ "}}";
-    }
+    return JsonSchema{
+        .type = "object",
+        .properties = props,
+        .required = if (required.len > 0) required else null,
+    };
 }
 
-fn generateEnumSchema(comptime T: type) []const u8 {
+fn generateEnumSchema(comptime T: type) JsonSchema {
     const info = @typeInfo(T).@"enum";
 
-    comptime var values: []const u8 = "";
-    comptime var first = true;
+    comptime var values: []const []const u8 = &[_][]const u8{};
 
     inline for (info.fields) |field| {
-        if (!first) {
-            values = values ++ ",";
-        }
-        first = false;
-        values = values ++ "\"" ++ field.name ++ "\"";
+        values = values ++ [_][]const u8{field.name};
     }
 
-    return "{\"type\":\"string\",\"enum\":[" ++ values ++ "]}";
+    return JsonSchema{
+        .type = "string",
+        .@"enum" = values,
+    };
 }
 
 // ==================== Tests ====================
+
+fn expectSchema(comptime T: type, expected: []const u8) !void {
+    const js = generate(T);
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer aw.deinit();
+    var jws: std.json.Stringify = .{ .writer = &aw.writer };
+    try js.jsonStringify(&jws);
+    try std.testing.expectEqualStrings(expected, aw.written());
+}
 
 test "generate schema for simple struct" {
     const Args = struct {
         message: []const u8,
     };
-
-    const schema = generate(Args);
-    try std.testing.expectEqualStrings(
-        "{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"]}",
-        schema,
-    );
+    try expectSchema(Args, "{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"]}");
 }
 
 test "generate schema for struct with optional" {
@@ -109,12 +147,7 @@ test "generate schema for struct with optional" {
         name: []const u8,
         nickname: ?[]const u8,
     };
-
-    const schema = generate(Args);
-    try std.testing.expectEqualStrings(
-        "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"nickname\":{\"type\":\"string\"}},\"required\":[\"name\"]}",
-        schema,
-    );
+    try expectSchema(Args, "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"nickname\":{\"type\":\"string\"}},\"required\":[\"name\"]}");
 }
 
 test "generate schema for struct with default" {
@@ -122,12 +155,7 @@ test "generate schema for struct with default" {
         name: []const u8,
         count: u32 = 10,
     };
-
-    const schema = generate(Args);
-    try std.testing.expectEqualStrings(
-        "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"count\":{\"type\":\"integer\"}},\"required\":[\"name\"]}",
-        schema,
-    );
+    try expectSchema(Args, "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"count\":{\"type\":\"integer\"}},\"required\":[\"name\"]}");
 }
 
 test "generate schema for nested struct" {
@@ -137,12 +165,7 @@ test "generate schema for nested struct" {
     const Outer = struct {
         inner: Inner,
     };
-
-    const schema = generate(Outer);
-    try std.testing.expectEqualStrings(
-        "{\"type\":\"object\",\"properties\":{\"inner\":{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\"}},\"required\":[\"value\"]}},\"required\":[\"inner\"]}",
-        schema,
-    );
+    try expectSchema(Outer, "{\"type\":\"object\",\"properties\":{\"inner\":{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\"}},\"required\":[\"value\"]}},\"required\":[\"inner\"]}");
 }
 
 test "generate schema for enum" {
@@ -150,32 +173,17 @@ test "generate schema for enum" {
     const Args = struct {
         color: Color,
     };
-
-    const schema = generate(Args);
-    try std.testing.expectEqualStrings(
-        "{\"type\":\"object\",\"properties\":{\"color\":{\"type\":\"string\",\"enum\":[\"red\",\"green\",\"blue\"]}},\"required\":[\"color\"]}",
-        schema,
-    );
+    try expectSchema(Args, "{\"type\":\"object\",\"properties\":{\"color\":{\"type\":\"string\",\"enum\":[\"red\",\"green\",\"blue\"]}},\"required\":[\"color\"]}");
 }
 
 test "generate schema for array" {
     const Args = struct {
         tags: []const []const u8,
     };
-
-    const schema = generate(Args);
-    try std.testing.expectEqualStrings(
-        "{\"type\":\"object\",\"properties\":{\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},\"required\":[\"tags\"]}",
-        schema,
-    );
+    try expectSchema(Args, "{\"type\":\"object\",\"properties\":{\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},\"required\":[\"tags\"]}");
 }
 
 test "generate schema for empty struct" {
     const Empty = struct {};
-
-    const schema = generate(Empty);
-    try std.testing.expectEqualStrings(
-        "{\"type\":\"object\",\"properties\":{}}",
-        schema,
-    );
+    try expectSchema(Empty, "{\"type\":\"object\",\"properties\":{}}");
 }

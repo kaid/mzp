@@ -304,34 +304,23 @@ pub const OwnedListRootsResult = struct {
     }
 };
 
+const schema = @import("serde/schema.zig");
+
 pub const Tool = struct {
     name: []const u8,
     description: ?[]const u8 = null,
-    /// Serialized JSON for the tool's `inputSchema` (typically a JSON Schema object).
-    ///
-    /// This is stored as raw JSON so callers can construct schemas ergonomically using
-    /// Zig structs (or provide a JSON string), without needing to build `json.Value`
-    /// object graphs by hand.
-    inputSchemaJson: []const u8,
-    inputSchemaJsonOwned: bool = false,
+    inputSchema: schema.JsonSchema,
 
-    pub fn deinit(self: Tool, allocator: std.mem.Allocator) void {
-        if (self.inputSchemaJsonOwned) allocator.free(@constCast(self.inputSchemaJson));
+    pub const Mapper = izo.Mapper(Tool, .{
+        .description = .{ .omit_null = true },
+    });
+
+    pub fn deinit(_: Tool, _: std.mem.Allocator) void {
+        // schema.JsonSchema is now composed of comptime constants
     }
 
     pub fn jsonStringify(self: Tool, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("name");
-        try jws.write(self.name);
-        if (self.description) |d| {
-            try jws.objectField("description");
-            try jws.write(d);
-        }
-        try jws.objectField("inputSchema");
-        try jws.beginWriteRaw();
-        try jws.writer.writeAll(self.inputSchemaJson);
-        jws.endWriteRaw();
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -339,19 +328,13 @@ pub const ListToolsResult = struct {
     tools: []const Tool,
     nextCursor: ?[]const u8 = null,
 
+    pub const Mapper = izo.Mapper(ListToolsResult, .{
+        .tools = .{ .element_mapper = Tool.Mapper },
+        .nextCursor = .{ .omit_null = true },
+    });
+
     pub fn jsonStringify(self: ListToolsResult, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("tools");
-        try jws.beginArray();
-        for (self.tools) |tool| {
-            try tool.jsonStringify(jws);
-        }
-        try jws.endArray();
-        if (self.nextCursor) |c| {
-            try jws.objectField("nextCursor");
-            try jws.write(c);
-        }
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -654,19 +637,13 @@ pub const PromptArgument = struct {
     description: ?[]const u8 = null,
     required: bool = false,
 
+    pub const Mapper = izo.Mapper(PromptArgument, .{
+        .description = .{ .omit_null = true },
+        .required = .{ .omit_default = true },
+    });
+
     pub fn jsonStringify(self: PromptArgument, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("name");
-        try jws.write(self.name);
-        if (self.description) |d| {
-            try jws.objectField("description");
-            try jws.write(d);
-        }
-        if (self.required) {
-            try jws.objectField("required");
-            try jws.write(true);
-        }
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -675,23 +652,13 @@ pub const Prompt = struct {
     description: ?[]const u8 = null,
     arguments: ?[]const PromptArgument = null,
 
+    pub const Mapper = izo.Mapper(Prompt, .{
+        .description = .{ .omit_null = true },
+        .arguments = .{ .omit_null = true, .element_mapper = PromptArgument.Mapper },
+    });
+
     pub fn jsonStringify(self: Prompt, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("name");
-        try jws.write(self.name);
-        if (self.description) |d| {
-            try jws.objectField("description");
-            try jws.write(d);
-        }
-        if (self.arguments) |args| {
-            try jws.objectField("arguments");
-            try jws.beginArray();
-            for (args) |a| {
-                try a.jsonStringify(jws);
-            }
-            try jws.endArray();
-        }
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -699,19 +666,13 @@ pub const ListPromptsResult = struct {
     prompts: []const Prompt,
     nextCursor: ?[]const u8 = null,
 
+    pub const Mapper = izo.Mapper(ListPromptsResult, .{
+        .prompts = .{ .element_mapper = Prompt.Mapper },
+        .nextCursor = .{ .omit_null = true },
+    });
+
     pub fn jsonStringify(self: ListPromptsResult, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("prompts");
-        try jws.beginArray();
-        for (self.prompts) |p| {
-            try p.jsonStringify(jws);
-        }
-        try jws.endArray();
-        if (self.nextCursor) |c| {
-            try jws.objectField("nextCursor");
-            try jws.write(c);
-        }
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -719,13 +680,10 @@ pub const PromptMessage = struct {
     role: Role,
     content: ContentBlock,
 
+    pub const Mapper = izo.Mapper(PromptMessage, .{});
+
     pub fn jsonStringify(self: PromptMessage, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("role");
-        try self.role.jsonStringify(jws);
-        try jws.objectField("content");
-        try self.content.jsonStringify(jws);
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -733,19 +691,13 @@ pub const GetPromptResult = struct {
     description: ?[]const u8 = null,
     messages: []const PromptMessage,
 
+    pub const Mapper = izo.Mapper(GetPromptResult, .{
+        .description = .{ .omit_null = true },
+        .messages = .{ .element_mapper = PromptMessage.Mapper },
+    });
+
     pub fn jsonStringify(self: GetPromptResult, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        if (self.description) |d| {
-            try jws.objectField("description");
-            try jws.write(d);
-        }
-        try jws.objectField("messages");
-        try jws.beginArray();
-        for (self.messages) |m| {
-            try m.jsonStringify(jws);
-        }
-        try jws.endArray();
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
