@@ -35,57 +35,75 @@ pub const Implementation = struct {
 
 pub const PromptsCapability = struct {
     list_changed: bool = false,
+
+    pub const Mapper = izo.Mapper(PromptsCapability, .{
+        .list_changed = .{ .alias = "listChanged", .omit_default = true },
+    });
+
+    pub fn jsonStringify(self: PromptsCapability, jws: *json.Stringify) !void {
+        try Mapper.adapter(self).jsonStringify(jws);
+    }
 };
 
 pub const ResourcesCapability = struct {
     subscribe: bool = false,
     list_changed: bool = false,
+
+    pub const Mapper = izo.Mapper(ResourcesCapability, .{
+        .subscribe = .{ .omit_default = true },
+        .list_changed = .{ .alias = "listChanged", .omit_default = true },
+    });
+
+    pub fn jsonStringify(self: ResourcesCapability, jws: *json.Stringify) !void {
+        try Mapper.adapter(self).jsonStringify(jws);
+    }
 };
 
 pub const ToolsCapability = struct {
     list_changed: bool = false,
+
+    pub const Mapper = izo.Mapper(ToolsCapability, .{
+        .list_changed = .{ .alias = "listChanged", .omit_default = true },
+    });
+
+    pub fn jsonStringify(self: ToolsCapability, jws: *json.Stringify) !void {
+        try Mapper.adapter(self).jsonStringify(jws);
+    }
 };
 
 pub const TasksRequestsCapability = struct {
-    /// Whether the peer supports task-augmented `tools/call` requests.
-    tools_call: bool = false,
+    pub const ToolCall = struct {
+        call: ?struct {} = null,
+
+        pub const Mapper = izo.Mapper(ToolCall, .{
+            .call = .{ .omit_null = true },
+        });
+    };
+
+    tools: ?ToolCall = null,
+
+    pub const Mapper = izo.Mapper(TasksRequestsCapability, .{
+        .tools = .{ .omit_null = true, .nested = ToolCall.Mapper },
+    });
 
     pub fn jsonStringify(self: TasksRequestsCapability, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        if (self.tools_call) {
-            try jws.objectField("tools");
-            try jws.beginObject();
-            try jws.objectField("call");
-            try jws.beginObject();
-            try jws.endObject();
-            try jws.endObject();
-        }
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
 pub const TasksCapability = struct {
-    list: bool = false,
-    cancel: bool = false,
+    list: ?struct {} = null,
+    cancel: ?struct {} = null,
     requests: ?TasksRequestsCapability = null,
 
+    pub const Mapper = izo.Mapper(TasksCapability, .{
+        .list = .{ .omit_null = true },
+        .cancel = .{ .omit_null = true },
+        .requests = .{ .omit_null = true, .nested = TasksRequestsCapability.Mapper },
+    });
+
     pub fn jsonStringify(self: TasksCapability, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        if (self.list) {
-            try jws.objectField("list");
-            try jws.beginObject();
-            try jws.endObject();
-        }
-        if (self.cancel) {
-            try jws.objectField("cancel");
-            try jws.beginObject();
-            try jws.endObject();
-        }
-        if (self.requests) |r| {
-            try jws.objectField("requests");
-            try r.jsonStringify(jws);
-        }
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -102,58 +120,18 @@ pub const ServerCapabilities = struct {
     completions: ?CompletionsCapability = null,
     experimental: ?json.Value = null,
 
+    pub const Mapper = izo.Mapper(ServerCapabilities, .{
+        .prompts = .{ .omit_null = true, .nested = PromptsCapability.Mapper },
+        .resources = .{ .omit_null = true, .nested = ResourcesCapability.Mapper },
+        .tools = .{ .omit_null = true, .nested = ToolsCapability.Mapper },
+        .tasks = .{ .omit_null = true, .nested = TasksCapability.Mapper },
+        .logging = .{ .omit_null = true },
+        .completions = .{ .omit_null = true },
+        .experimental = .{ .omit_null = true },
+    });
+
     pub fn jsonStringify(self: ServerCapabilities, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        if (self.prompts) |p| {
-            try jws.objectField("prompts");
-            try jws.beginObject();
-            if (p.list_changed) {
-                try jws.objectField("listChanged");
-                try jws.write(true);
-            }
-            try jws.endObject();
-        }
-        if (self.resources) |r| {
-            try jws.objectField("resources");
-            try jws.beginObject();
-            if (r.subscribe) {
-                try jws.objectField("subscribe");
-                try jws.write(true);
-            }
-            if (r.list_changed) {
-                try jws.objectField("listChanged");
-                try jws.write(true);
-            }
-            try jws.endObject();
-        }
-        if (self.tools) |t| {
-            try jws.objectField("tools");
-            try jws.beginObject();
-            if (t.list_changed) {
-                try jws.objectField("listChanged");
-                try jws.write(true);
-            }
-            try jws.endObject();
-        }
-        if (self.tasks) |t| {
-            try jws.objectField("tasks");
-            try t.jsonStringify(jws);
-        }
-        if (self.logging != null) {
-            try jws.objectField("logging");
-            try jws.beginObject();
-            try jws.endObject();
-        }
-        if (self.completions != null) {
-            try jws.objectField("completions");
-            try jws.beginObject();
-            try jws.endObject();
-        }
-        if (self.experimental) |e| {
-            try jws.objectField("experimental");
-            try jws.write(e);
-        }
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -968,8 +946,8 @@ pub const ListTasksResult = struct {
 
 test "ServerCapabilities stringify" {
     const caps = ServerCapabilities{
-        .tools = .{ .list_changed = true },
-        .resources = .{ .subscribe = true },
+        .tools = ToolsCapability{ .list_changed = true },
+        .resources = ResourcesCapability{ .subscribe = true },
     };
 
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
@@ -985,9 +963,9 @@ test "ServerCapabilities stringify" {
 test "TasksCapability stringify uses nested objects" {
     const caps = ServerCapabilities{
         .tasks = .{
-            .list = true,
-            .cancel = true,
-            .requests = .{ .tools_call = true },
+            .list = .{},
+            .cancel = .{},
+            .requests = .{ .tools = .{ .call = .{} } },
         },
     };
 

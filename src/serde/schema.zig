@@ -1,4 +1,5 @@
 const std = @import("std");
+const izo = @import("izomorph");
 
 pub const JsonSchema = struct {
     type: []const u8,
@@ -12,37 +13,48 @@ pub const JsonSchema = struct {
         schema: JsonSchema,
     };
 
-    pub fn jsonStringify(self: JsonSchema, jws: *std.json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("type");
-        try jws.write(self.type);
+    pub const Mapper = izo.Mapper(JsonSchema, .{
+        .properties = .{ .omit_null = true, .nested = PropertiesAdapter },
+        .required = .{ .omit_null = true },
+        .items = .{ .omit_null = true, .nested = ItemsAdapter },
+        .@"enum" = .{ .alias = "enum", .omit_null = true },
+    });
 
-        if (self.properties) |props| {
-            try jws.objectField("properties");
+    pub fn jsonStringify(self: JsonSchema, jws: *std.json.Stringify) !void {
+        try Mapper.adapter(self).jsonStringify(jws);
+    }
+};
+
+pub const PropertiesAdapter = struct {
+    pub const Adapter = struct {
+        value: []const JsonSchema.Property,
+
+        pub fn jsonStringify(self: @This(), jws: *std.json.Stringify) !void {
             try jws.beginObject();
-            for (props) |prop| {
+            for (self.value) |prop| {
                 try jws.objectField(prop.name);
                 try prop.schema.jsonStringify(jws);
             }
             try jws.endObject();
         }
+    };
 
-        if (self.required) |req| {
-            try jws.objectField("required");
-            try jws.write(req);
+    pub fn adapter(value: []const JsonSchema.Property) Adapter {
+        return .{ .value = value };
+    }
+};
+
+pub const ItemsAdapter = struct {
+    pub const Adapter = struct {
+        value: *const JsonSchema,
+
+        pub fn jsonStringify(self: @This(), jws: *std.json.Stringify) !void {
+            try self.value.jsonStringify(jws);
         }
+    };
 
-        if (self.items) |it| {
-            try jws.objectField("items");
-            try it.jsonStringify(jws);
-        }
-
-        if (self.@"enum") |en| {
-            try jws.objectField("enum");
-            try jws.write(en);
-        }
-
-        try jws.endObject();
+    pub fn adapter(value: *const JsonSchema) Adapter {
+        return .{ .value = value };
     }
 };
 

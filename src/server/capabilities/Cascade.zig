@@ -41,9 +41,9 @@ pub const Cascade = struct {
             .resources = if (self.resources.count() > 0) .{} else null,
             .prompts = if (self.prompts.count() > 0) .{} else null,
             .tasks = if (self.tasks.enabled) .{
-                .list = true,
-                .cancel = true,
-                .requests = .{ .tools_call = true },
+                .list = .{},
+                .cancel = .{},
+                .requests = .{ .tools = .{ .call = .{} } },
             } else null,
         };
     }
