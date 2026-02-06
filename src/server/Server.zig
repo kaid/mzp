@@ -8,6 +8,7 @@ const cancellation_mod = @import("cancellation.zig");
 const cascade_mod = @import("capabilities/Cascade.zig");
 const pending_mod = @import("../pending_registry.zig");
 const typed_codec = @import("../serde/typed_codec.zig");
+const envelope_codec = @import("../serde/envelope_codec.zig");
 const Io = std.Io;
 
 pub const Transport = transport_mod.Transport;
@@ -463,26 +464,23 @@ pub const Server = struct {
 
     fn sendCancelledNotification(self: *Server, id: jsonrpc.RequestId) void {
         const io = self.io orelse return;
-        var aw: Io.Writer.Allocating = .init(self.getAllocator());
-        defer aw.deinit();
+        const a = self.getAllocator();
+        const CancelParams = struct {
+            requestId: jsonrpc.RequestId,
 
-        var jws: json.Stringify = .{ .writer = &aw.writer };
-        jws.beginObject() catch return;
-        jws.objectField("jsonrpc") catch return;
-        jws.write("2.0") catch return;
-        jws.objectField("method") catch return;
-        jws.write("notifications/cancelled") catch return;
-        jws.objectField("params") catch return;
-        jws.beginObject() catch return;
-        jws.objectField("requestId") catch return;
-        id.jsonStringify(&jws) catch return;
-        jws.endObject() catch return;
-        jws.endObject() catch return;
+            pub fn jsonStringify(self_: @This(), jws: *json.Stringify) !void {
+                try jws.beginObject();
+                try jws.objectField("requestId");
+                try self_.requestId.jsonStringify(jws);
+                try jws.endObject();
+            }
+        };
+        const payload = envelope_codec.encodeNotificationAlloc(a, "notifications/cancelled", CancelParams{ .requestId = id }) catch return;
+        defer a.free(payload);
 
-        aw.writer.flush() catch return;
         self.io_mutex.lockUncancelable(io);
         defer self.io_mutex.unlock(io);
-        _ = self.transport.write(io, aw.written()) catch {};
+        _ = self.transport.write(io, payload) catch {};
     }
 
     fn waitSharedPending(sp: *pending_mod.PendingRegistry.SharedPending, io: Io) (std.Io.QueueClosedError || std.Io.Cancelable)!pending_mod.PendingRegistry.Outcome {
@@ -505,28 +503,12 @@ pub const Server = struct {
         defer shared.release(a, io);
         errdefer self.pending.abandon(io, borrowed_id);
 
-        var aw: Io.Writer.Allocating = .init(a);
-        defer aw.deinit();
-
-        var jws: json.Stringify = .{ .writer = &aw.writer };
-        try jws.beginObject();
-        try jws.objectField("jsonrpc");
-        try jws.write("2.0");
-        try jws.objectField("id");
-        try id.jsonStringify(&jws);
-        try jws.objectField("method");
-        try jws.write(method);
-        if (@TypeOf(params) != @TypeOf(null)) {
-            try jws.objectField("params");
-            try serializeParams(&jws, params);
-        }
-        try jws.endObject();
-
-        try aw.writer.flush();
+        const payload = try envelope_codec.encodeRequestAlloc(a, id, method, params);
+        defer a.free(payload);
         self.io_mutex.lockUncancelable(io);
         {
             defer self.io_mutex.unlock(io);
-            try self.transport.write(io, aw.written());
+            try self.transport.write(io, payload);
         }
 
         const eff_timeout = self.effectiveTimeout(timeout);
@@ -569,50 +551,6 @@ pub const Server = struct {
             .failed => error.RequestFailed,
             .connection_closed => error.ConnectionClosed,
         };
-    }
-
-    fn serializeParams(jws: *json.Stringify, params: anytype) !void {
-        const T = @TypeOf(params);
-        if (T == json.Value) {
-            try jws.write(params);
-        } else if (@typeInfo(T) == .optional) {
-            if (params) |p| {
-                try serializeParams(jws, p);
-            } else {
-                try jws.write(null);
-            }
-        } else if (@typeInfo(T) == .@"struct") {
-            try jws.beginObject();
-            inline for (@typeInfo(T).@"struct".fields) |field| {
-                const field_value = @field(params, field.name);
-                const FieldType = @TypeOf(field_value);
-                if (@typeInfo(FieldType) == .optional) {
-                    if (field_value != null) {
-                        try jws.objectField(field.name);
-                        try serializeWithJsonStringify(jws, field_value.?);
-                    }
-                } else {
-                    try jws.objectField(field.name);
-                    try serializeWithJsonStringify(jws, field_value);
-                }
-            }
-            try jws.endObject();
-        } else {
-            try jws.write(params);
-        }
-    }
-
-    fn serializeWithJsonStringify(jws: *json.Stringify, value: anytype) !void {
-        const T = @TypeOf(value);
-        const is_container = switch (@typeInfo(T)) {
-            .@"struct", .@"enum", .@"union", .@"opaque" => true,
-            else => false,
-        };
-        if (is_container and @hasDecl(T, "jsonStringify")) {
-            try value.jsonStringify(jws);
-        } else {
-            try jws.write(value);
-        }
     }
 
     fn handlePing(self: *Server, req: jsonrpc.Request) !void {
@@ -663,23 +601,12 @@ pub const Server = struct {
 
     pub fn sendResult(self: *Server, id: jsonrpc.RequestId, result: anytype) !void {
         const io = self.io orelse return error.IoNotSet;
-        var aw: Io.Writer.Allocating = .init(self.getAllocator());
-        defer aw.deinit();
-
-        var jws: json.Stringify = .{ .writer = &aw.writer };
-        try jws.beginObject();
-        try jws.objectField("jsonrpc");
-        try jws.write("2.0");
-        try jws.objectField("id");
-        try id.jsonStringify(&jws);
-        try jws.objectField("result");
-        try result.jsonStringify(&jws);
-        try jws.endObject();
-
-        try aw.writer.flush();
+        const a = self.getAllocator();
+        const payload = try envelope_codec.encodeResponseAlloc(a, id, result);
+        defer a.free(payload);
         self.io_mutex.lockUncancelable(io);
         defer self.io_mutex.unlock(io);
-        try self.transport.write(io, aw.written());
+        try self.transport.write(io, payload);
     }
 
     fn getCapabilities(self: *Server) types.ServerCapabilities {
@@ -696,37 +623,22 @@ pub const Server = struct {
 
     pub fn sendError(self: *Server, err: jsonrpc.Error) !void {
         const io = self.io orelse return error.IoNotSet;
-        var aw: Io.Writer.Allocating = .init(self.getAllocator());
-        defer aw.deinit();
-
-        var jws: json.Stringify = .{ .writer = &aw.writer };
-        try err.jsonStringify(&jws);
-
-        try aw.writer.flush();
+        const a = self.getAllocator();
+        const payload = try envelope_codec.encodeErrorAlloc(a, err);
+        defer a.free(payload);
         self.io_mutex.lockUncancelable(io);
         defer self.io_mutex.unlock(io);
-        try self.transport.write(io, aw.written());
+        try self.transport.write(io, payload);
     }
 
     pub fn sendNotification(self: *Server, method: []const u8, params: anytype) !void {
         const io = self.io orelse return error.IoNotSet;
-        var aw: Io.Writer.Allocating = .init(self.getAllocator());
-        defer aw.deinit();
-
-        var jws: json.Stringify = .{ .writer = &aw.writer };
-        try jws.beginObject();
-        try jws.objectField("jsonrpc");
-        try jws.write("2.0");
-        try jws.objectField("method");
-        try jws.write(method);
-        try jws.objectField("params");
-        try params.jsonStringify(&jws);
-        try jws.endObject();
-
-        try aw.writer.flush();
+        const a = self.getAllocator();
+        const payload = try envelope_codec.encodeNotificationAlloc(a, method, params);
+        defer a.free(payload);
         self.io_mutex.lockUncancelable(io);
         defer self.io_mutex.unlock(io);
-        try self.transport.write(io, aw.written());
+        try self.transport.write(io, payload);
     }
 
     pub fn sendLogMessage(self: *Server, level: types.LoggingLevel, data: json.Value, logger: ?[]const u8) !void {
