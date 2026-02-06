@@ -162,7 +162,7 @@ pub const Capability = struct {
             },
         };
 
-        const task_md = tasks_mod.parseTaskMetadata(params_obj) catch {
+        const task_md = tasks_mod.parseTaskMetadataValue(params_obj.get("task")) catch {
             try server.sendError(jsonrpc.Error.invalidParams(req.id, "Invalid task metadata"));
             return;
         };
@@ -186,7 +186,7 @@ pub const Capability = struct {
 
         const arguments = params_obj.get("arguments");
 
-        var meta = parseToolCallMeta(params_obj);
+        var meta = parseToolCallMeta(params_obj.get("_meta"));
         meta.task = task_md;
 
         // tasks mode: only used when tasks are enabled and the client provided params.task.
@@ -234,9 +234,8 @@ pub const Capability = struct {
         _ = notif;
     }
 
-    fn parseToolCallMeta(params_obj: json.ObjectMap) common.ToolCallMeta {
-        const meta_val = params_obj.get("_meta") orelse return .{};
-        const meta_obj = switch (meta_val) {
+    fn parseToolCallMeta(meta_val: ?json.Value) common.ToolCallMeta {
+        const meta_obj = switch (meta_val orelse return .{}) {
             .object => |o| o,
             else => return .{},
         };

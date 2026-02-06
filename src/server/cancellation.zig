@@ -1,5 +1,6 @@
 const std = @import("std");
 const jsonrpc = @import("../jsonrpc.zig");
+const typed_codec = @import("../serde/typed_codec.zig");
 
 pub fn registerActiveRequest(self: anytype, req: *(@TypeOf(self.*).ActiveRequest)) void {
     self.active_requests_mutex.lock();
@@ -21,20 +22,17 @@ pub fn unregisterActiveRequest(self: anytype, req: *(@TypeOf(self.*).ActiveReque
 
 pub fn handleCancelledNotification(self: anytype, notif: jsonrpc.Notification) void {
     const params = notif.params orelse return;
-    const obj = switch (params) {
-        .object => |o| o,
-        else => return,
+
+    var arena = std.heap.ArenaAllocator.init(self.getAllocator());
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const Params = struct {
+        requestId: jsonrpc.RequestId,
     };
-    const rid_val = obj.get("requestId") orelse return;
-    const rid: jsonrpc.RequestId = switch (rid_val) {
-        .string => |s| .{ .string = s },
-        .integer => |n| .{ .number = n },
-        .number_string => |s| blk: {
-            const parsed = std.fmt.parseInt(i64, s, 10) catch return;
-            break :blk .{ .number = parsed };
-        },
-        else => return,
-    };
+    const ParamsMapper = typed_codec.defaultMapper(Params);
+    const parsed = typed_codec.valueToTyped(a, Params, ParamsMapper, params) catch return;
+    const rid = parsed.requestId;
 
     self.active_requests_mutex.lock();
     defer self.active_requests_mutex.unlock();
@@ -44,4 +42,3 @@ pub fn handleCancelledNotification(self: anytype, notif: jsonrpc.Notification) v
         }
     }
 }
-

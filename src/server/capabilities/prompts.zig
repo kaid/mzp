@@ -2,11 +2,12 @@ const std = @import("std");
 const json = std.json;
 const jsonrpc = @import("../../jsonrpc.zig");
 const types = @import("../../types.zig");
+const typed_codec = @import("../../serde/typed_codec.zig");
 
 pub const HandlerWithUserData = *const fn (
     user_data: ?*anyopaque,
     name: []const u8,
-    arguments: ?json.ObjectMap,
+    arguments: ?json.Value,
     allocator: std.mem.Allocator,
 ) anyerror!types.OwnedGetPromptResult;
 
@@ -74,38 +75,28 @@ pub const Capability = struct {
             try server.sendError(jsonrpc.Error.invalidParams(req.id, "Missing params"));
             return;
         };
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
 
-        const params_obj = switch (params) {
-            .object => |o| o,
-            else => {
-                try server.sendError(jsonrpc.Error.invalidParams(req.id, "Params must be object"));
-                return;
-            },
+        const Params = struct {
+            name: []const u8,
+            arguments: ?json.Value = null,
         };
+        const ParamsMapper = typed_codec.defaultMapper(Params);
 
-        const name_val = params_obj.get("name") orelse {
-            try server.sendError(jsonrpc.Error.invalidParams(req.id, "Missing name"));
+        const parsed = typed_codec.valueToTyped(a, Params, ParamsMapper, params) catch {
+            try server.sendError(jsonrpc.Error.invalidParams(req.id, "Params must include string name"));
             return;
         };
-
-        const name = switch (name_val) {
-            .string => |s| s,
-            else => {
-                try server.sendError(jsonrpc.Error.invalidParams(req.id, "Name must be string"));
-                return;
-            },
-        };
+        const name = parsed.name;
 
         const prompt_info = self.prompts.get(name) orelse {
             try server.sendError(jsonrpc.Error.invalidParams(req.id, "Unknown prompt"));
             return;
         };
 
-        const arguments_val = params_obj.get("arguments");
-        const arguments: ?json.ObjectMap = if (arguments_val) |av| switch (av) {
-            .object => |o| o,
-            else => null,
-        } else null;
+        const arguments = parsed.arguments;
 
         var result = prompt_info.handler(prompt_info.user_data, name, arguments, self.allocator) catch |err| {
             try server.sendError(jsonrpc.Error.internalError(req.id, @errorName(err)));

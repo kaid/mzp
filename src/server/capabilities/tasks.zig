@@ -306,21 +306,19 @@ pub const Capability = struct {
         var cursor: ?usize = null;
         if (req.params) |p| {
             if (p != .null) {
-                const obj = switch (p) {
-                    .object => |o| o,
-                    else => {
-                        try server.sendError(jsonrpc.Error.invalidParams(req.id, "Params must be object"));
-                        return;
-                    },
+                var arena = std.heap.ArenaAllocator.init(self.taskAllocator());
+                defer arena.deinit();
+                const a = arena.allocator();
+
+                const Params = struct {
+                    cursor: ?[]const u8 = null,
                 };
-                if (obj.get("cursor")) |c| {
-                    const s = switch (c) {
-                        .string => |cs| cs,
-                        else => {
-                            try server.sendError(jsonrpc.Error.invalidParams(req.id, "cursor must be string"));
-                            return;
-                        },
-                    };
+                const ParamsMapper = typed_codec.defaultMapper(Params);
+                const parsed = typed_codec.valueToTyped(a, Params, ParamsMapper, p) catch {
+                    try server.sendError(jsonrpc.Error.invalidParams(req.id, "Params must be object"));
+                    return;
+                };
+                if (parsed.cursor) |s| {
                     cursor = std.fmt.parseInt(usize, s, 10) catch {
                         try server.sendError(jsonrpc.Error.invalidParams(req.id, "Invalid cursor"));
                         return;
@@ -379,14 +377,9 @@ pub const Capability = struct {
             try server.sendError(jsonrpc.Error.invalidParams(req.id, "Missing params"));
             return;
         };
-        const obj = switch (params) {
-            .object => |o| o,
-            else => {
-                try server.sendError(jsonrpc.Error.invalidParams(req.id, "Params must be object"));
-                return;
-            },
-        };
-        const id = getTaskIdParam(obj) orelse {
+        var arena = std.heap.ArenaAllocator.init(self.taskAllocator());
+        defer arena.deinit();
+        const id = getTaskIdParamValue(arena.allocator(), params) orelse {
             try server.sendError(jsonrpc.Error.invalidParams(req.id, "Missing task id"));
             return;
         };
@@ -414,14 +407,9 @@ pub const Capability = struct {
             try server.sendError(jsonrpc.Error.invalidParams(req.id, "Missing params"));
             return;
         };
-        const obj = switch (params) {
-            .object => |o| o,
-            else => {
-                try server.sendError(jsonrpc.Error.invalidParams(req.id, "Params must be object"));
-                return;
-            },
-        };
-        const id = getTaskIdParam(obj) orelse {
+        var arena = std.heap.ArenaAllocator.init(self.taskAllocator());
+        defer arena.deinit();
+        const id = getTaskIdParamValue(arena.allocator(), params) orelse {
             try server.sendError(jsonrpc.Error.invalidParams(req.id, "Missing task id"));
             return;
         };
@@ -467,14 +455,9 @@ pub const Capability = struct {
             try server.sendError(jsonrpc.Error.invalidParams(req.id, "Missing params"));
             return;
         };
-        const obj = switch (params) {
-            .object => |o| o,
-            else => {
-                try server.sendError(jsonrpc.Error.invalidParams(req.id, "Params must be object"));
-                return;
-            },
-        };
-        const id = getTaskIdParam(obj) orelse {
+        var params_arena = std.heap.ArenaAllocator.init(self.taskAllocator());
+        defer params_arena.deinit();
+        const id = getTaskIdParamValue(params_arena.allocator(), params) orelse {
             try server.sendError(jsonrpc.Error.invalidParams(req.id, "Missing task id"));
             return;
         };
@@ -590,10 +573,10 @@ pub const Capability = struct {
     }
 };
 
-pub fn parseTaskMetadata(params_obj: json.ObjectMap) !?types.TaskMetadata {
-    const task_val = params_obj.get("task") orelse return null;
-    if (task_val == .null) return null;
-    if (task_val != .object) return error.InvalidTaskMetadata;
+pub fn parseTaskMetadataValue(task_val: ?json.Value) !?types.TaskMetadata {
+    const tv = task_val orelse return null;
+    if (tv == .null) return null;
+    if (tv != .object) return error.InvalidTaskMetadata;
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -605,7 +588,7 @@ pub fn parseTaskMetadata(params_obj: json.ObjectMap) !?types.TaskMetadata {
     };
     const WireTaskMetadataMapper = typed_codec.defaultMapper(WireTaskMetadata);
 
-    const decoded = typed_codec.valueToTyped(a, WireTaskMetadata, WireTaskMetadataMapper, task_val) catch {
+    const decoded = typed_codec.valueToTyped(a, WireTaskMetadata, WireTaskMetadataMapper, tv) catch {
         return error.InvalidTaskMetadata;
     };
 
@@ -615,16 +598,15 @@ pub fn parseTaskMetadata(params_obj: json.ObjectMap) !?types.TaskMetadata {
     };
 }
 
-fn getTaskIdParam(obj: json.ObjectMap) ?[]const u8 {
-    if (obj.get("id")) |v| switch (v) {
-        .string => |s| return s,
-        else => {},
+fn getTaskIdParamValue(allocator: std.mem.Allocator, params: json.Value) ?[]const u8 {
+    const Params = struct {
+        id: ?[]const u8 = null,
+        taskId: ?[]const u8 = null,
     };
-    if (obj.get("taskId")) |v| switch (v) {
-        .string => |s| return s,
-        else => {},
-    };
-    return null;
+    const ParamsMapper = typed_codec.defaultMapper(Params);
+    const parsed = typed_codec.valueToTyped(allocator, Params, ParamsMapper, params) catch return null;
+    if (parsed.id) |id| return id;
+    return parsed.taskId;
 }
 
 fn allocIsoTimestamp(allocator: std.mem.Allocator) ![]u8 {

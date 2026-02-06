@@ -1,7 +1,7 @@
 const std = @import("std");
-const json = std.json;
 const jsonrpc = @import("../../jsonrpc.zig");
 const types = @import("../../types.zig");
+const typed_codec = @import("../../serde/typed_codec.zig");
 
 pub const HandlerWithUserData = *const fn (
     user_data: ?*anyopaque,
@@ -73,27 +73,20 @@ pub const Capability = struct {
             try server.sendError(jsonrpc.Error.invalidParams(req.id, "Missing params"));
             return;
         };
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
 
-        const params_obj = switch (params) {
-            .object => |o| o,
-            else => {
-                try server.sendError(jsonrpc.Error.invalidParams(req.id, "Params must be object"));
-                return;
-            },
+        const Params = struct {
+            uri: []const u8,
         };
+        const ParamsMapper = typed_codec.defaultMapper(Params);
 
-        const uri_val = params_obj.get("uri") orelse {
-            try server.sendError(jsonrpc.Error.invalidParams(req.id, "Missing uri"));
+        const parsed = typed_codec.valueToTyped(a, Params, ParamsMapper, params) catch {
+            try server.sendError(jsonrpc.Error.invalidParams(req.id, "Params must contain string uri"));
             return;
         };
-
-        const uri = switch (uri_val) {
-            .string => |s| s,
-            else => {
-                try server.sendError(jsonrpc.Error.invalidParams(req.id, "Uri must be string"));
-                return;
-            },
-        };
+        const uri = parsed.uri;
 
         const resource_info = self.resources.get(uri) orelse {
             try server.sendError(jsonrpc.Error.invalidParams(req.id, "Unknown resource"));

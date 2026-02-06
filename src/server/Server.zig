@@ -637,24 +637,20 @@ pub const Server = struct {
             try self.sendError(jsonrpc.Error.invalidParams(req.id, "Missing params"));
             return;
         };
-        const obj = switch (params) {
-            .object => |o| o,
-            else => {
-                try self.sendError(jsonrpc.Error.invalidParams(req.id, "Params must be an object"));
-                return;
-            },
+
+        var arena = std.heap.ArenaAllocator.init(self.getAllocator());
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        const Params = struct {
+            level: []const u8,
         };
-        const level_val = obj.get("level") orelse {
-            try self.sendError(jsonrpc.Error.invalidParams(req.id, "Missing params.level"));
+        const ParamsMapper = typed_codec.defaultMapper(Params);
+        const parsed = typed_codec.valueToTyped(a, Params, ParamsMapper, params) catch {
+            try self.sendError(jsonrpc.Error.invalidParams(req.id, "params.level must be a string"));
             return;
         };
-        const level_str = switch (level_val) {
-            .string => |s| s,
-            else => {
-                try self.sendError(jsonrpc.Error.invalidParams(req.id, "params.level must be a string"));
-                return;
-            },
-        };
+        const level_str = parsed.level;
 
         const level = std.meta.stringToEnum(types.LoggingLevel, level_str) orelse {
             try self.sendError(jsonrpc.Error.invalidParams(req.id, "Unknown log level"));
