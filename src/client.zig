@@ -82,8 +82,8 @@ pub const Client = struct {
         self.inbound_queue = std.Io.Queue(*jsonrpc.Message).init(self.inbound_buf[0..]);
         self.run_group = .init;
 
-        try self.run_group.concurrent(io, readerMain, .{ self });
-        try self.run_group.concurrent(io, dispatcherMain, .{ self });
+        try self.run_group.concurrent(io, readerMain, .{self});
+        try self.run_group.concurrent(io, dispatcherMain, .{self});
 
         try self.run_group.await(io);
 
@@ -209,7 +209,7 @@ pub const Client = struct {
     }
 
     fn sendInitializedNotification(self: *Client) !void {
-        try self.sendNotificationRaw("notifications/initialized", null);
+        try self.sendNotification("notifications/initialized", null);
     }
 
     pub fn ping(self: *Client) !void {
@@ -417,10 +417,10 @@ pub const Client = struct {
         try self.sendError(jsonrpc.Error.methodNotFound(req.id, req.method));
     }
 
-    fn sendNotificationRaw(self: *Client, method: []const u8, params: ?json.Value) !void {
+    fn sendNotification(self: *Client, method: []const u8, params: anytype) !void {
         const io = self.io orelse return error.IoNotSet;
         const a = self.getAllocator();
-        const payload = try envelope_codec.encodeNotificationRawAlloc(a, method, params);
+        const payload = try envelope_codec.encodeNotificationAlloc(a, method, params);
         defer a.free(payload);
         self.io_mutex.lockUncancelable(io);
         defer self.io_mutex.unlock(io);
@@ -430,7 +430,7 @@ pub const Client = struct {
     pub fn sendRootsListChanged(self: *Client) !void {
         const roots_cap = self.options.capabilities.roots orelse return;
         if (!roots_cap.list_changed) return;
-        try self.sendNotificationRaw("notifications/roots/list_changed", null);
+        try self.sendNotification("notifications/roots/list_changed", null);
     }
 
     fn sendResult(self: *Client, id: jsonrpc.RequestId, result: anytype) !void {

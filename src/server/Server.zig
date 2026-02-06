@@ -1372,22 +1372,17 @@ test "Server tools/list includes inputSchema" {
     defer server.deinit();
     server.io = io;
 
-    const schema = .{
-        .type = "object",
-        .properties = .{
-            .message = .{ .type = "string" },
-        },
-        .required = &[_][]const u8{"message"},
+    // addTyped auto-generates schema from EchoArgs
+    const EchoArgs = struct {
+        message: []const u8,
     };
-    const EmptyArgs = struct {};
-    const EmptyArgsMapper = typed_codec.defaultMapper(EmptyArgs);
+    const EchoArgsMapper = typed_codec.defaultMapper(EchoArgs);
 
     try server.capabilities.tools.addTyped(.{
         .name = "echo",
         .description = "Echo",
-        .inputSchema = schema,
-    }, EmptyArgsMapper, struct {
-        fn handler(_: ?*anyopaque, _: []const u8, _: ?EmptyArgs, _: ToolCallMeta, _: CancellationToken, allocator: std.mem.Allocator) anyerror!types.OwnedCallToolResult {
+    }, EchoArgsMapper, struct {
+        fn handler(_: ?*anyopaque, _: []const u8, _: ?EchoArgs, _: ToolCallMeta, _: CancellationToken, allocator: std.mem.Allocator) anyerror!types.OwnedCallToolResult {
             var result = types.OwnedCallToolResult.init(allocator);
             try result.addText("ok");
             return result;

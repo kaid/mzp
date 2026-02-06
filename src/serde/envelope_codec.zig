@@ -47,33 +47,9 @@ pub fn encodeNotificationAlloc(
     try jws.write("2.0");
     try jws.objectField("method");
     try jws.write(method);
-    try jws.objectField("params");
-    try params.jsonStringify(&jws);
-    try jws.endObject();
-
-    try aw.writer.flush();
-    const out = try allocator.dupe(u8, aw.written());
-    aw.deinit();
-    return out;
-}
-
-pub fn encodeNotificationRawAlloc(
-    allocator: std.mem.Allocator,
-    method: []const u8,
-    params: ?json.Value,
-) ![]u8 {
-    var aw: Io.Writer.Allocating = .init(allocator);
-    errdefer aw.deinit();
-
-    var jws: json.Stringify = .{ .writer = &aw.writer };
-    try jws.beginObject();
-    try jws.objectField("jsonrpc");
-    try jws.write("2.0");
-    try jws.objectField("method");
-    try jws.write(method);
-    if (params) |p| {
+    if (@TypeOf(params) != @TypeOf(null)) {
         try jws.objectField("params");
-        try jws.write(p);
+        try writeRequestParams(&jws, params);
     }
     try jws.endObject();
 
@@ -98,7 +74,7 @@ pub fn encodeResponseAlloc(
     try jws.objectField("id");
     try id.jsonStringify(&jws);
     try jws.objectField("result");
-    try result.jsonStringify(&jws);
+    try writeRequestValue(&jws, result);
     try jws.endObject();
 
     try aw.writer.flush();
@@ -134,21 +110,27 @@ fn writeRequestParams(jws: *json.Stringify, params: anytype) !void {
             try jws.write(null);
         }
     } else if (@typeInfo(T) == .@"struct") {
-        try jws.beginObject();
-        inline for (@typeInfo(T).@"struct".fields) |field| {
-            const field_value = @field(params, field.name);
-            const FieldType = @TypeOf(field_value);
-            if (@typeInfo(FieldType) == .optional) {
-                if (field_value != null) {
+        // If type has custom jsonStringify, use it
+        if (@hasDecl(T, "jsonStringify")) {
+            try params.jsonStringify(jws);
+        } else {
+            // Otherwise iterate fields with omit_null behavior
+            try jws.beginObject();
+            inline for (@typeInfo(T).@"struct".fields) |field| {
+                const field_value = @field(params, field.name);
+                const FieldType = @TypeOf(field_value);
+                if (@typeInfo(FieldType) == .optional) {
+                    if (field_value != null) {
+                        try jws.objectField(field.name);
+                        try writeRequestValue(jws, field_value.?);
+                    }
+                } else {
                     try jws.objectField(field.name);
-                    try writeRequestValue(jws, field_value.?);
+                    try writeRequestValue(jws, field_value);
                 }
-            } else {
-                try jws.objectField(field.name);
-                try writeRequestValue(jws, field_value);
             }
+            try jws.endObject();
         }
-        try jws.endObject();
     } else {
         try jws.write(params);
     }

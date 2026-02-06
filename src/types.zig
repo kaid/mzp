@@ -23,21 +23,13 @@ pub const Implementation = struct {
     title: ?[]const u8 = null,
     description: ?[]const u8 = null,
 
+    pub const Mapper = izo.Mapper(Implementation, .{
+        .title = .{ .omit_null = true },
+        .description = .{ .omit_null = true },
+    });
+
     pub fn jsonStringify(self: Implementation, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("name");
-        try jws.write(self.name);
-        try jws.objectField("version");
-        try jws.write(self.version);
-        if (self.title) |t| {
-            try jws.objectField("title");
-            try jws.write(t);
-        }
-        if (self.description) |d| {
-            try jws.objectField("description");
-            try jws.write(d);
-        }
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -245,15 +237,12 @@ pub const Root = struct {
     uri: []const u8,
     name: ?[]const u8 = null,
 
+    pub const Mapper = izo.Mapper(Root, .{
+        .name = .{ .omit_null = true },
+    });
+
     pub fn jsonStringify(self: Root, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("uri");
-        try jws.write(self.uri);
-        if (self.name) |n| {
-            try jws.objectField("name");
-            try jws.write(n);
-        }
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -407,33 +396,17 @@ fn stringifyAnyJsonValue(jws: *json.Stringify, value: anytype) !void {
 pub const TextContent = struct {
     type: []const u8 = "text",
     text: []const u8,
-
-    pub fn jsonStringify(self: TextContent, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("type");
-        try jws.write(self.type);
-        try jws.objectField("text");
-        try jws.write(self.text);
-        try jws.endObject();
-    }
 };
+
+pub const TextContentMapper = izo.Mapper(TextContent, .{});
 
 pub const ImageContent = struct {
     type: []const u8 = "image",
     data: []const u8,
     mimeType: []const u8,
-
-    pub fn jsonStringify(self: ImageContent, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("type");
-        try jws.write(self.type);
-        try jws.objectField("data");
-        try jws.write(self.data);
-        try jws.objectField("mimeType");
-        try jws.write(self.mimeType);
-        try jws.endObject();
-    }
 };
+
+pub const ImageContentMapper = izo.Mapper(ImageContent, .{});
 
 pub const ContentBlock = union(enum) {
     text: TextContent,
@@ -441,8 +414,8 @@ pub const ContentBlock = union(enum) {
 
     pub fn jsonStringify(self: ContentBlock, jws: *json.Stringify) !void {
         switch (self) {
-            .text => |t| try t.jsonStringify(jws),
-            .image => |i| try i.jsonStringify(jws),
+            .text => |t| try jws.write(TextContentMapper.adapter(t)),
+            .image => |i| try jws.write(ImageContentMapper.adapter(i)),
         }
     }
 };
@@ -525,21 +498,13 @@ pub const Resource = struct {
     description: ?[]const u8 = null,
     mimeType: ?[]const u8 = null,
 
+    pub const Mapper = izo.Mapper(Resource, .{
+        .description = .{ .omit_null = true },
+        .mimeType = .{ .omit_null = true },
+    });
+
     pub fn jsonStringify(self: Resource, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("uri");
-        try jws.write(self.uri);
-        try jws.objectField("name");
-        try jws.write(self.name);
-        if (self.description) |d| {
-            try jws.objectField("description");
-            try jws.write(d);
-        }
-        if (self.mimeType) |m| {
-            try jws.objectField("mimeType");
-            try jws.write(m);
-        }
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -547,19 +512,13 @@ pub const ListResourcesResult = struct {
     resources: []const Resource,
     nextCursor: ?[]const u8 = null,
 
+    pub const Mapper = izo.Mapper(ListResourcesResult, .{
+        .resources = .{ .element_mapper = Resource.Mapper },
+        .nextCursor = .{ .omit_null = true },
+    });
+
     pub fn jsonStringify(self: ListResourcesResult, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("resources");
-        try jws.beginArray();
-        for (self.resources) |r| {
-            try r.jsonStringify(jws);
-        }
-        try jws.endArray();
-        if (self.nextCursor) |c| {
-            try jws.objectField("nextCursor");
-            try jws.write(c);
-        }
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -568,17 +527,12 @@ pub const TextResourceContents = struct {
     mimeType: ?[]const u8 = null,
     text: []const u8,
 
+    pub const Mapper = izo.Mapper(TextResourceContents, .{
+        .mimeType = .{ .omit_null = true },
+    });
+
     pub fn jsonStringify(self: TextResourceContents, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("uri");
-        try jws.write(self.uri);
-        if (self.mimeType) |m| {
-            try jws.objectField("mimeType");
-            try jws.write(m);
-        }
-        try jws.objectField("text");
-        try jws.write(self.text);
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -587,17 +541,12 @@ pub const BlobResourceContents = struct {
     mimeType: ?[]const u8 = null,
     blob: []const u8,
 
+    pub const Mapper = izo.Mapper(BlobResourceContents, .{
+        .mimeType = .{ .omit_null = true },
+    });
+
     pub fn jsonStringify(self: BlobResourceContents, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("uri");
-        try jws.write(self.uri);
-        if (self.mimeType) |m| {
-            try jws.objectField("mimeType");
-            try jws.write(m);
-        }
-        try jws.objectField("blob");
-        try jws.write(self.blob);
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -883,12 +832,9 @@ pub const LoggingSetLevelParams = struct {
     }
 };
 
-pub const EmptyResult = struct {
-    pub fn jsonStringify(_: EmptyResult, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.endObject();
-    }
-};
+pub const EmptyResult = struct {};
+
+pub const EmptyResultMapper = izo.Mapper(EmptyResult, .{});
 
 pub const LoggingMessageParams = struct {
     level: LoggingLevel,

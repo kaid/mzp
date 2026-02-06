@@ -6,6 +6,7 @@ const common = @import("../common.zig");
 const cancellation_mod = @import("../cancellation.zig");
 const tasks_mod = @import("tasks.zig");
 const typed_codec = @import("../../serde/typed_codec.zig");
+const schema = @import("../../serde/schema.zig");
 
 pub const Capability = struct {
     allocator: std.mem.Allocator,
@@ -79,7 +80,22 @@ pub const Capability = struct {
             }
         };
 
-        try self.registerWithUserData(tool, Adapter.bridge, user_data);
+        // Auto-generate JSON Schema from Args type at comptime
+        const T = @TypeOf(tool);
+        if (!@hasField(T, "name")) @compileError("tools.addTyped: tool must have a `name` field");
+        const name: []const u8 = tool.name;
+        const description: ?[]const u8 = if (@hasField(T, "description")) tool.description else null;
+
+        try self.tools.put(name, .{
+            .tool = .{
+                .name = name,
+                .description = description,
+                .inputSchemaJson = schema.generate(Args),
+                .inputSchemaJsonOwned = false, // comptime string, no need to free
+            },
+            .handler = Adapter.bridge,
+            .user_data = user_data orelse self.default_user_data,
+        });
     }
 
     fn registerWithUserData(

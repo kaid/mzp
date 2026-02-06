@@ -32,19 +32,11 @@ pub fn main(init: std.process.Init) !void {
     );
     defer server.deinit();
 
-    const schema = .{
-        .type = "object",
-        .properties = .{
-            .message = .{ .type = "string" },
-        },
-        .required = &[_][]const u8{"message"},
-    };
-
+    // addTyped auto-generates inputSchema from EchoArgs at comptime
     try server.capabilities.tools.addTyped(
         .{
             .name = "echo",
             .description = "Echoes back the input",
-            .inputSchema = schema,
         },
         EchoArgsMapper,
         echoHandler,

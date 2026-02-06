@@ -61,9 +61,12 @@
         //    // actually used.
         //    .lazy = false,
         //},
+        // .izo = .{
+        //     .url = "https://github.com/kaid/izomorph/archive/refs/heads/trunk.tar.gz",
+        //     .hash = "izomorph-0.0.0--ctBErsOAQBITghu95YG5qPOT5wPfIENbavfN_6FQzhC",
+        // },
         .izo = .{
-            .url = "https://github.com/kaid/izomorph/archive/refs/heads/trunk.tar.gz",
-            .hash = "izomorph-0.0.0--ctBErsOAQBITghu95YG5qPOT5wPfIENbavfN_6FQzhC",
+            .path = "../izomorph",
         },
     },
     // Specifies the set of files and directories that are included in this package.
