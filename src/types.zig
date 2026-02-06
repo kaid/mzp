@@ -1,6 +1,7 @@
 const std = @import("std");
 const json = std.json;
 const Io = std.Io;
+const izo = @import("izomorph");
 
 pub const LATEST_PROTOCOL_VERSION = "2025-11-25";
 pub const DEFAULT_NEGOTIATED_VERSION = "2025-03-26";
@@ -366,6 +367,12 @@ pub const ListToolsResult = struct {
 };
 
 pub fn stringifyJsonAlloc(allocator: std.mem.Allocator, value: anytype) ![]u8 {
+    const T = @TypeOf(value);
+    if (comptime shouldUseIzoStringify(T)) {
+        const Mapper = comptime izo.Mapper(T, .{});
+        return @constCast(try izo.json.encode(allocator, value, Mapper, .{}));
+    }
+
     var aw: Io.Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
 
@@ -376,6 +383,12 @@ pub fn stringifyJsonAlloc(allocator: std.mem.Allocator, value: anytype) ![]u8 {
     const result = try allocator.dupe(u8, aw.written());
     aw.deinit();
     return result;
+}
+
+fn shouldUseIzoStringify(comptime T: type) bool {
+    const info = @typeInfo(T);
+    if (info != .@"struct") return false;
+    return !@hasDecl(T, "jsonStringify");
 }
 
 fn stringifyAnyJsonValue(jws: *json.Stringify, value: anytype) !void {

@@ -4,6 +4,7 @@ const jsonrpc = @import("../../jsonrpc.zig");
 const types = @import("../../types.zig");
 const common = @import("../common.zig");
 const builtin = @import("builtin");
+const typed_codec = @import("../../serde/typed_codec.zig");
 
 pub extern "kernel32" fn GetSystemTimeAsFileTime(lpSystemTimeAsFileTime: *std.os.windows.FILETIME) callconv(.winapi) void;
 
@@ -592,32 +593,26 @@ pub const Capability = struct {
 pub fn parseTaskMetadata(params_obj: json.ObjectMap) !?types.TaskMetadata {
     const task_val = params_obj.get("task") orelse return null;
     if (task_val == .null) return null;
-    const task_obj = switch (task_val) {
-        .object => |o| o,
-        else => return error.InvalidTaskMetadata,
+    if (task_val != .object) return error.InvalidTaskMetadata;
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const WireTaskMetadata = struct {
+        ttl: ?u64 = null,
+        pollInterval: ?u64 = null,
+    };
+    const WireTaskMetadataMapper = typed_codec.defaultMapper(WireTaskMetadata);
+
+    const decoded = typed_codec.valueToTyped(a, WireTaskMetadata, WireTaskMetadataMapper, task_val) catch {
+        return error.InvalidTaskMetadata;
     };
 
-    var md: types.TaskMetadata = .{};
-
-    if (task_obj.get("ttl")) |ttl_val| {
-        const ttl = switch (ttl_val) {
-            .integer => |n| if (n < 0) return error.InvalidTaskMetadata else @as(u64, @intCast(n)),
-            .number_string => |s| try std.fmt.parseInt(u64, s, 10),
-            else => return error.InvalidTaskMetadata,
-        };
-        md.ttl = ttl;
-    }
-
-    if (task_obj.get("pollInterval")) |pi_val| {
-        const pi = switch (pi_val) {
-            .integer => |n| if (n < 0) return error.InvalidTaskMetadata else @as(u64, @intCast(n)),
-            .number_string => |s| try std.fmt.parseInt(u64, s, 10),
-            else => return error.InvalidTaskMetadata,
-        };
-        md.pollInterval = pi;
-    }
-
-    return md;
+    return .{
+        .ttl = decoded.ttl,
+        .pollInterval = decoded.pollInterval,
+    };
 }
 
 fn getTaskIdParam(obj: json.ObjectMap) ?[]const u8 {

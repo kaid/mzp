@@ -5,6 +5,10 @@ pub const types = @import("types.zig");
 pub const transport = @import("transport.zig");
 pub const server = @import("server.zig");
 pub const client = @import("client.zig");
+pub const serde = struct {
+    pub const typed_codec = @import("serde/typed_codec.zig");
+};
+pub const typed_registry = @import("typed_registry.zig");
 
 pub const JsonRpcRequest = jsonrpc.Request;
 pub const JsonRpcResponse = jsonrpc.Response;

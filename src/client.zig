@@ -1,9 +1,11 @@
 const std = @import("std");
 const json = std.json;
+const izo = @import("izomorph");
 const jsonrpc = @import("jsonrpc.zig");
 const types = @import("types.zig");
 const transport_mod = @import("transport.zig");
 const pending_mod = @import("pending_registry.zig");
+const typed_codec = @import("serde/typed_codec.zig");
 const Io = std.Io;
 
 pub const Transport = transport_mod.Transport;
@@ -190,10 +192,14 @@ pub const Client = struct {
             },
         };
 
-        const result_value = try self.sendRequest("initialize", params);
-        defer jsonrpc.Message.freeValue(self.getAllocator(), result_value);
-
-        const result = try parseInitializeResult(self.allocator, result_value);
+        const wire_result = try self.requestTyped(
+            WireInitializeResult,
+            WireInitializeResultMapper,
+            "initialize",
+            params,
+            null,
+        );
+        const result = wireInitializeToPublic(wire_result);
         self.setServerStateFromInitializeResult(result);
 
         try self.sendInitializedNotification();
@@ -206,46 +212,8 @@ pub const Client = struct {
     }
 
     pub fn ping(self: *Client) !void {
-        _ = try self.sendRequest("ping", null);
-    }
-
-    pub fn listTools(self: *Client) !json.Value {
-        return try self.sendRequest("tools/list", null);
-    }
-
-    pub fn callTool(self: *Client, name: []const u8, arguments: ?json.Value) !json.Value {
-        var params_obj = json.ObjectMap.init(self.allocator);
-        defer params_obj.deinit();
-        try params_obj.put("name", .{ .string = name });
-        if (arguments) |args| {
-            try params_obj.put("arguments", args);
-        }
-        return try self.sendRequest("tools/call", .{ .object = params_obj });
-    }
-
-    pub fn listResources(self: *Client) !json.Value {
-        return try self.sendRequest("resources/list", null);
-    }
-
-    pub fn readResource(self: *Client, uri: []const u8) !json.Value {
-        var params_obj = json.ObjectMap.init(self.allocator);
-        defer params_obj.deinit();
-        try params_obj.put("uri", .{ .string = uri });
-        return try self.sendRequest("resources/read", .{ .object = params_obj });
-    }
-
-    pub fn listPrompts(self: *Client) !json.Value {
-        return try self.sendRequest("prompts/list", null);
-    }
-
-    pub fn getPrompt(self: *Client, name: []const u8, arguments: ?json.ObjectMap) !json.Value {
-        var params_obj = json.ObjectMap.init(self.allocator);
-        defer params_obj.deinit();
-        try params_obj.put("name", .{ .string = name });
-        if (arguments) |args| {
-            try params_obj.put("arguments", .{ .object = args });
-        }
-        return try self.sendRequest("prompts/get", .{ .object = params_obj });
+        const result = try self.requestRaw("ping", null, null);
+        defer jsonrpc.Message.freeValue(self.getAllocator(), result);
     }
 
     pub fn newNumericId(self: *Client) jsonrpc.RequestId {
@@ -254,14 +222,53 @@ pub const Client = struct {
 
     /// Sends a JSON-RPC request to the server.
     /// If `timeout` is null, uses `options.default_timeout`.
-    pub fn request(self: *Client, method: []const u8, params: anytype, timeout: ?Io.Clock.Duration) !json.Value {
+    fn requestRaw(self: *Client, method: []const u8, params: anytype, timeout: ?Io.Clock.Duration) !json.Value {
         const id = self.newNumericId();
         return self.sendRequestWithIdTimeout(id, method, params, timeout);
     }
 
-    fn sendRequest(self: *Client, method: []const u8, params: anytype) !json.Value {
-        const id = self.newNumericId();
-        return self.sendRequestWithIdTimeout(id, method, params, null);
+    pub fn requestTyped(
+        self: *Client,
+        comptime Resp: type,
+        comptime RespMapper: type,
+        method: []const u8,
+        params: anytype,
+        timeout: ?Io.Clock.Duration,
+    ) !Resp {
+        const result_value = try self.requestRaw(method, params, timeout);
+        defer jsonrpc.Message.freeValue(self.getAllocator(), result_value);
+        return try typed_codec.valueToTyped(self.allocator, Resp, RespMapper, result_value);
+    }
+
+    pub fn requestTypedDefault(
+        self: *Client,
+        comptime Resp: type,
+        method: []const u8,
+        params: anytype,
+        timeout: ?Io.Clock.Duration,
+    ) !Resp {
+        return try self.requestTyped(Resp, typed_codec.defaultMapper(Resp), method, params, timeout);
+    }
+
+    pub fn callToolTyped(
+        self: *Client,
+        comptime Args: type,
+        comptime Resp: type,
+        comptime ArgsMapper: type,
+        comptime RespMapper: type,
+        name: []const u8,
+        arguments: ?Args,
+        timeout: ?Io.Clock.Duration,
+    ) !Resp {
+        const params = struct {
+            name: []const u8,
+            arguments: ?Args = null,
+        }{
+            .name = name,
+            .arguments = arguments,
+        };
+        _ = ArgsMapper; // currently kept for parity with typed tool registration APIs.
+        return try self.requestTyped(Resp, RespMapper, "tools/call", params, timeout);
     }
 
     fn effectiveTimeout(self: *Client, timeout: ?Io.Clock.Duration) ?Io.Clock.Duration {
@@ -570,129 +577,51 @@ pub const Client = struct {
     }
 };
 
-fn parseInitializeResult(allocator: std.mem.Allocator, value: json.Value) !types.InitializeResult {
-    const obj = switch (value) {
-        .object => |o| o,
-        else => return error.InvalidInitializeResult,
-    };
+const WirePromptsCapability = struct {
+    listChanged: bool = false,
+};
 
-    const protocol_val = obj.get("protocolVersion") orelse return error.InvalidInitializeResult;
-    const protocol_version = switch (protocol_val) {
-        .string => |s| try allocator.dupe(u8, s),
-        else => return error.InvalidInitializeResult,
-    };
-    errdefer allocator.free(protocol_version);
+const WireResourcesCapability = struct {
+    subscribe: bool = false,
+    listChanged: bool = false,
+};
 
-    const server_info_val = obj.get("serverInfo") orelse return error.InvalidInitializeResult;
-    const server_info = try parseImplementationFromValue(allocator, server_info_val);
-    errdefer freeImplementation(allocator, server_info);
+const WireToolsCapability = struct {
+    listChanged: bool = false,
+};
 
-    const instructions_val = obj.get("instructions");
-    const instructions: ?[]const u8 = if (instructions_val) |iv| switch (iv) {
-        .string => |s| try allocator.dupe(u8, s),
-        else => null,
-    } else null;
-    errdefer if (instructions) |i| allocator.free(@constCast(i));
+const WireServerCapabilities = struct {
+    prompts: ?WirePromptsCapability = null,
+    resources: ?WireResourcesCapability = null,
+    tools: ?WireToolsCapability = null,
+    logging: ?struct {} = null,
+    completions: ?struct {} = null,
+};
 
-    const caps_val = obj.get("capabilities");
-    const caps: types.ServerCapabilities = if (caps_val) |cv| parseServerCapabilities(cv) else .{};
+const WireInitializeResult = struct {
+    protocolVersion: []const u8,
+    capabilities: WireServerCapabilities,
+    serverInfo: types.Implementation,
+    instructions: ?[]const u8 = null,
+};
 
+const WireInitializeResultMapper = izo.Mapper(WireInitializeResult, .{});
+
+fn wireInitializeToPublic(wire: WireInitializeResult) types.InitializeResult {
     return .{
-        .protocolVersion = protocol_version,
-        .capabilities = caps,
-        .serverInfo = server_info,
-        .instructions = instructions,
-    };
-}
-
-fn parseImplementationFromValue(allocator: std.mem.Allocator, value: json.Value) !types.Implementation {
-    const obj = switch (value) {
-        .object => |o| o,
-        else => return error.InvalidInitializeResult,
-    };
-
-    const name_val = obj.get("name") orelse return error.InvalidInitializeResult;
-    const version_val = obj.get("version") orelse return error.InvalidInitializeResult;
-
-    const name = switch (name_val) {
-        .string => |s| try allocator.dupe(u8, s),
-        else => return error.InvalidInitializeResult,
-    };
-    errdefer allocator.free(name);
-
-    const version = switch (version_val) {
-        .string => |s| try allocator.dupe(u8, s),
-        else => return error.InvalidInitializeResult,
-    };
-    errdefer allocator.free(version);
-
-    const title = if (obj.get("title")) |t| switch (t) {
-        .string => |s| try allocator.dupe(u8, s),
-        else => null,
-    } else null;
-    errdefer if (title) |t| allocator.free(@constCast(t));
-
-    const description = if (obj.get("description")) |d| switch (d) {
-        .string => |s| try allocator.dupe(u8, s),
-        else => null,
-    } else null;
-    errdefer if (description) |d| allocator.free(@constCast(d));
-
-    return .{
-        .name = name,
-        .version = version,
-        .title = title,
-        .description = description,
-    };
-}
-
-fn parseServerCapabilities(value: json.Value) types.ServerCapabilities {
-    const obj = switch (value) {
-        .object => |o| o,
-        else => return .{},
-    };
-
-    var caps: types.ServerCapabilities = .{};
-
-    if (obj.get("prompts")) |p| {
-        if (p == .object) {
-            const list_changed = getBool(p.object, "listChanged");
-            caps.prompts = .{ .list_changed = list_changed };
-        } else {
-            caps.prompts = .{};
-        }
-    }
-
-    if (obj.get("resources")) |r| {
-        if (r == .object) {
-            const subscribe = getBool(r.object, "subscribe");
-            const list_changed = getBool(r.object, "listChanged");
-            caps.resources = .{ .subscribe = subscribe, .list_changed = list_changed };
-        } else {
-            caps.resources = .{};
-        }
-    }
-
-    if (obj.get("tools")) |t| {
-        if (t == .object) {
-            const list_changed = getBool(t.object, "listChanged");
-            caps.tools = .{ .list_changed = list_changed };
-        } else {
-            caps.tools = .{};
-        }
-    }
-
-    if (obj.get("logging") != null) caps.logging = .{};
-    if (obj.get("completions") != null) caps.completions = .{};
-
-    return caps;
-}
-
-fn getBool(obj: json.ObjectMap, key: []const u8) bool {
-    const v = obj.get(key) orelse return false;
-    return switch (v) {
-        .bool => |b| b,
-        else => false,
+        .protocolVersion = wire.protocolVersion,
+        .capabilities = .{
+            .prompts = if (wire.capabilities.prompts) |p| .{ .list_changed = p.listChanged } else null,
+            .resources = if (wire.capabilities.resources) |r| .{
+                .subscribe = r.subscribe,
+                .list_changed = r.listChanged,
+            } else null,
+            .tools = if (wire.capabilities.tools) |t| .{ .list_changed = t.listChanged } else null,
+            .logging = if (wire.capabilities.logging != null) .{} else null,
+            .completions = if (wire.capabilities.completions != null) .{} else null,
+        },
+        .serverInfo = wire.serverInfo,
+        .instructions = wire.instructions,
     };
 }
 

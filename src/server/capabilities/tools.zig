@@ -5,6 +5,7 @@ const types = @import("../../types.zig");
 const common = @import("../common.zig");
 const cancellation_mod = @import("../cancellation.zig");
 const tasks_mod = @import("tasks.zig");
+const typed_codec = @import("../../serde/typed_codec.zig");
 
 pub const Capability = struct {
     allocator: std.mem.Allocator,
@@ -40,6 +41,55 @@ pub const Capability = struct {
 
     pub fn add(self: *Capability, tool: anytype, handler: common.ToolHandler) !void {
         return self.addWithUserData(tool, handler, null);
+    }
+
+    pub fn TypedToolHandler(comptime Args: type) type {
+        return *const fn (
+            user_data: ?*anyopaque,
+            name: []const u8,
+            arguments: ?Args,
+            meta: common.ToolCallMeta,
+            cancel: common.CancellationToken,
+            allocator: std.mem.Allocator,
+        ) anyerror!types.OwnedCallToolResult;
+    }
+
+    pub fn addTyped(
+        self: *Capability,
+        tool: anytype,
+        comptime Args: type,
+        comptime ArgsMapper: type,
+        comptime handler: TypedToolHandler(Args),
+    ) !void {
+        return self.addTypedWithUserData(tool, Args, ArgsMapper, handler, null);
+    }
+
+    pub fn addTypedWithUserData(
+        self: *Capability,
+        tool: anytype,
+        comptime Args: type,
+        comptime ArgsMapper: type,
+        comptime handler: TypedToolHandler(Args),
+        user_data: ?*anyopaque,
+    ) !void {
+        const Adapter = struct {
+            fn bridge(
+                bridge_user_data: ?*anyopaque,
+                name: []const u8,
+                arguments: ?json.Value,
+                meta: common.ToolCallMeta,
+                cancel: common.CancellationToken,
+                allocator: std.mem.Allocator,
+            ) anyerror!types.OwnedCallToolResult {
+                const typed_args: ?Args = if (arguments) |raw_args|
+                    try typed_codec.valueToTyped(allocator, Args, ArgsMapper, raw_args)
+                else
+                    null;
+                return try handler(bridge_user_data, name, typed_args, meta, cancel, allocator);
+            }
+        };
+
+        try self.addWithUserData(tool, Adapter.bridge, user_data);
     }
 
     pub fn addWithUserData(

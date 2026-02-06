@@ -7,6 +7,7 @@ const common = @import("common.zig");
 const cancellation_mod = @import("cancellation.zig");
 const cascade_mod = @import("capabilities/Cascade.zig");
 const pending_mod = @import("../pending_registry.zig");
+const typed_codec = @import("../serde/typed_codec.zig");
 const Io = std.Io;
 
 pub const Transport = transport_mod.Transport;
@@ -53,6 +54,24 @@ pub const Server = struct {
         id: jsonrpc.RequestId,
         cancelled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     };
+
+    const WireClientRootsCapability = struct {
+        listChanged: bool = false,
+    };
+
+    const WireClientCapabilities = struct {
+        roots: ?WireClientRootsCapability = null,
+        sampling: ?struct {} = null,
+        elicitation: ?struct {} = null,
+    };
+
+    const WireInitializeRequestParams = struct {
+        protocolVersion: ?[]const u8 = null,
+        capabilities: ?WireClientCapabilities = null,
+        clientInfo: ?types.Implementation = null,
+    };
+
+    const WireInitializeRequestParamsMapper = typed_codec.defaultMapper(WireInitializeRequestParams);
 
     allocator: std.mem.Allocator,
     options: ServerOptions,
@@ -251,16 +270,36 @@ pub const Server = struct {
     /// Sends `roots/list` to the connected client and returns the client's current roots.
     /// Caller owns the returned value and must call `deinit()`.
     pub fn listRoots(self: *Server) !types.OwnedListRootsResult {
-        const result_value = try self.requestClient("roots/list", null, null);
-        defer jsonrpc.Message.freeValue(self.getAllocator(), result_value);
-        return try self.parseListRootsResult(result_value);
+        var arena = std.heap.ArenaAllocator.init(self.getAllocator());
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        const decoded = try self.requestClientTypedWithAllocator(
+            a,
+            WireListRootsResult,
+            WireListRootsResultMapper,
+            "roots/list",
+            null,
+            null,
+        );
+        return try ownedRootsFromWire(self.allocator, decoded.roots);
     }
 
     /// Like `listRoots` but allows overriding the timeout for this call.
     pub fn listRootsWithTimeout(self: *Server, timeout: ?Io.Clock.Duration) !types.OwnedListRootsResult {
-        const result_value = try self.requestClient("roots/list", null, timeout);
-        defer jsonrpc.Message.freeValue(self.getAllocator(), result_value);
-        return try self.parseListRootsResult(result_value);
+        var arena = std.heap.ArenaAllocator.init(self.getAllocator());
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        const decoded = try self.requestClientTypedWithAllocator(
+            a,
+            WireListRootsResult,
+            WireListRootsResultMapper,
+            "roots/list",
+            null,
+            timeout,
+        );
+        return try ownedRootsFromWire(self.allocator, decoded.roots);
     }
 
     pub fn handleMessage(self: *Server, msg: jsonrpc.Message) !void {
@@ -312,30 +351,31 @@ pub const Server = struct {
 
         if (req.params) |params| {
             if (params == .object) {
-                const obj = params.object;
-                if (obj.get("protocolVersion")) |pv| {
-                    if (pv == .string) {
-                        const duped = try self.allocator.dupe(u8, pv.string);
+                const parsed = typed_codec.valueToTyped(
+                    self.allocator,
+                    WireInitializeRequestParams,
+                    WireInitializeRequestParamsMapper,
+                    params,
+                ) catch null;
+                if (parsed) |p| {
+                    if (p.protocolVersion) |pv| {
                         if (self.negotiated_version_owned) |v| self.allocator.free(v);
-                        self.negotiated_version_owned = duped;
-                        self.negotiated_version = duped;
+                        self.negotiated_version_owned = @constCast(pv);
+                        self.negotiated_version = pv;
                     }
-                }
-                if (obj.get("clientInfo")) |ci| {
-                    if (ci == .object) {
-                        const parsed: ?types.Implementation = parseImplementation(self.allocator, ci.object) catch null;
-                        if (parsed) |info| {
-                            if (self.client_info_owned) {
-                                if (self.client_info) |old| freeImplementation(self.allocator, old);
-                            }
-                            self.client_info_owned = true;
-                            self.client_info = info;
+                    if (p.clientInfo) |info| {
+                        if (self.client_info_owned) {
+                            if (self.client_info) |old| freeImplementation(self.allocator, old);
                         }
+                        self.client_info_owned = true;
+                        self.client_info = info;
                     }
-                }
-                if (obj.get("capabilities")) |caps_val| {
-                    if (caps_val == .object) {
-                        self.client_capabilities = self.parseClientCapabilities(caps_val.object);
+                    if (p.capabilities) |caps| {
+                        self.client_capabilities = .{
+                            .roots = if (caps.roots) |r| .{ .list_changed = r.listChanged } else null,
+                            .sampling = if (caps.sampling != null) .{} else null,
+                            .elicitation = if (caps.elicitation != null) .{} else null,
+                        };
                     }
                 }
             }
@@ -356,60 +396,23 @@ pub const Server = struct {
         try self.sendResult(req.id, result);
     }
 
-    fn parseClientCapabilities(_: *Server, obj: json.ObjectMap) types.ClientCapabilities {
-        var caps: types.ClientCapabilities = .{};
+    const WireRoot = struct {
+        uri: []const u8,
+        name: ?[]const u8 = null,
+    };
 
-        if (obj.get("roots")) |r| {
-            if (r == .object) {
-                const list_changed = getBool(r.object, "listChanged");
-                caps.roots = .{ .list_changed = list_changed };
-            } else {
-                caps.roots = .{};
-            }
-        }
+    const WireListRootsResult = struct {
+        roots: []const WireRoot,
+    };
 
-        if (obj.get("sampling") != null) caps.sampling = .{};
-        if (obj.get("elicitation") != null) caps.elicitation = .{};
+    const WireListRootsResultMapper = typed_codec.defaultMapper(WireListRootsResult);
 
-        return caps;
-    }
-
-    fn parseListRootsResult(self: *Server, value: json.Value) !types.OwnedListRootsResult {
-        const obj = switch (value) {
-            .object => |o| o,
-            else => return error.InvalidRootsListResult,
-        };
-
-        const roots_val = obj.get("roots") orelse return error.InvalidRootsListResult;
-        const roots_arr = switch (roots_val) {
-            .array => |a| a,
-            else => return error.InvalidRootsListResult,
-        };
-
-        var result = types.OwnedListRootsResult.init(self.allocator);
+    fn ownedRootsFromWire(allocator: std.mem.Allocator, roots: []const WireRoot) !types.OwnedListRootsResult {
+        var result = types.OwnedListRootsResult.init(allocator);
         errdefer result.deinit();
-
-        for (roots_arr.items) |item| {
-            const root_obj = switch (item) {
-                .object => |o| o,
-                else => return error.InvalidRootsListResult,
-            };
-
-            const uri_val = root_obj.get("uri") orelse return error.InvalidRootsListResult;
-            const uri = switch (uri_val) {
-                .string => |s| s,
-                else => return error.InvalidRootsListResult,
-            };
-
-            const name_val = root_obj.get("name");
-            const name: ?[]const u8 = if (name_val) |nv| switch (nv) {
-                .string => |s| s,
-                else => return error.InvalidRootsListResult,
-            } else null;
-
-            try result.addRoot(uri, name);
+        for (roots) |r| {
+            try result.addRoot(r.uri, r.name);
         }
-
         return result;
     }
 
@@ -431,6 +434,31 @@ pub const Server = struct {
     pub fn requestClient(self: *Server, method: []const u8, params: anytype, timeout: ?Io.Clock.Duration) !json.Value {
         const id = self.newNumericId();
         return self.sendRequestWithIdTimeout(id, method, params, timeout);
+    }
+
+    pub fn requestClientTyped(
+        self: *Server,
+        comptime Resp: type,
+        comptime RespMapper: type,
+        method: []const u8,
+        params: anytype,
+        timeout: ?Io.Clock.Duration,
+    ) !Resp {
+        return try self.requestClientTypedWithAllocator(self.getAllocator(), Resp, RespMapper, method, params, timeout);
+    }
+
+    pub fn requestClientTypedWithAllocator(
+        self: *Server,
+        allocator: std.mem.Allocator,
+        comptime Resp: type,
+        comptime RespMapper: type,
+        method: []const u8,
+        params: anytype,
+        timeout: ?Io.Clock.Duration,
+    ) !Resp {
+        const result_value = try self.requestClient(method, params, timeout);
+        defer jsonrpc.Message.freeValue(self.getAllocator(), result_value);
+        return try typed_codec.valueToTyped(allocator, Resp, RespMapper, result_value);
     }
 
     fn sendCancelledNotification(self: *Server, id: jsonrpc.RequestId) void {
@@ -684,14 +712,6 @@ pub const Server = struct {
         try self.transport.write(io, aw.written());
     }
 
-    fn getBool(obj: json.ObjectMap, key: []const u8) bool {
-        const v = obj.get(key) orelse return false;
-        return switch (v) {
-            .bool => |b| b,
-            else => false,
-        };
-    }
-
     pub fn sendNotification(self: *Server, method: []const u8, params: anytype) !void {
         const io = self.io orelse return error.IoNotSet;
         var aw: Io.Writer.Allocating = .init(self.getAllocator());
@@ -757,41 +777,6 @@ pub const Server = struct {
             .total = total,
             .message = message,
         });
-    }
-
-    fn parseImplementation(allocator: std.mem.Allocator, obj: json.ObjectMap) !types.Implementation {
-        const name_val = obj.get("name") orelse return error.InvalidRequest;
-        const version_val = obj.get("version") orelse return error.InvalidRequest;
-
-        const name = switch (name_val) {
-            .string => |s| try allocator.dupe(u8, s),
-            else => return error.InvalidRequest,
-        };
-        errdefer allocator.free(name);
-
-        const version = switch (version_val) {
-            .string => |s| try allocator.dupe(u8, s),
-            else => return error.InvalidRequest,
-        };
-        errdefer allocator.free(version);
-
-        const title = if (obj.get("title")) |t| switch (t) {
-            .string => |s| try allocator.dupe(u8, s),
-            else => null,
-        } else null;
-        errdefer if (title) |t| allocator.free(t);
-
-        const description = if (obj.get("description")) |d| switch (d) {
-            .string => |s| try allocator.dupe(u8, s),
-            else => null,
-        } else null;
-
-        return .{
-            .name = name,
-            .version = version,
-            .title = title,
-            .description = description,
-        };
     }
 
     fn freeImplementation(allocator: std.mem.Allocator, impl: types.Implementation) void {

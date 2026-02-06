@@ -1,5 +1,11 @@
 const std = @import("std");
 const mzp = @import("mzp");
+const izo = @import("izomorph");
+
+const EchoArgs = struct {
+    message: []const u8,
+};
+const EchoArgsMapper = izo.Mapper(EchoArgs, .{});
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -34,12 +40,14 @@ pub fn main(init: std.process.Init) !void {
         .required = &[_][]const u8{"message"},
     };
 
-    try server.capabilities.tools.add(
+    try server.capabilities.tools.addTyped(
         .{
             .name = "echo",
             .description = "Echoes back the input",
             .inputSchema = schema,
         },
+        EchoArgs,
+        EchoArgsMapper,
         echoHandler,
     );
 
@@ -49,22 +57,12 @@ pub fn main(init: std.process.Init) !void {
 fn echoHandler(
     _: ?*anyopaque,
     _: []const u8,
-    arguments: ?std.json.Value,
+    arguments: ?EchoArgs,
     _: mzp.server.ToolCallMeta,
     _: mzp.server.CancellationToken,
     allocator: std.mem.Allocator,
 ) !mzp.types.OwnedCallToolResult {
-    const text = if (arguments) |args| blk: {
-        const obj = switch (args) {
-            .object => |o| o,
-            else => break :blk "No arguments",
-        };
-        const msg = obj.get("message") orelse break :blk "No message";
-        break :blk switch (msg) {
-            .string => |s| s,
-            else => "Invalid message type",
-        };
-    } else "No arguments";
+    const text = if (arguments) |args| args.message else "No arguments";
 
     var result = mzp.types.OwnedCallToolResult.init(allocator);
     try result.addText(text);
