@@ -37,7 +37,7 @@ pub const Capability = struct {
         return self.resources.count();
     }
 
-    pub fn addWithUserData(
+    pub fn add(
         self: *Capability,
         resource: types.Resource,
         handler: HandlerWithUserData,
@@ -48,10 +48,6 @@ pub const Capability = struct {
             .handler = handler,
             .user_data = user_data orelse self.default_user_data,
         });
-    }
-
-    pub fn add(self: *Capability, resource: types.Resource, handler: HandlerWithUserData) !void {
-        return self.addWithUserData(resource, handler, null);
     }
 
     pub fn handleList(self: *Capability, server: anytype, req: jsonrpc.Request) !void {

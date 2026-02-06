@@ -913,6 +913,17 @@ pub const ProgressToken = union(enum) {
     string: []const u8,
     number: i64,
 
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: json.ParseOptions) !ProgressToken {
+        _ = options;
+        const token = try source.next();
+        switch (token) {
+            .string => |s| return .{ .string = try allocator.dupe(u8, s) },
+            .allocated_string => |s| return .{ .string = s },
+            .number => |n| return .{ .number = try std.fmt.parseInt(i64, n, 10) },
+            else => return error.UnexpectedToken,
+        }
+    }
+
     pub fn jsonStringify(self: ProgressToken, jws: *json.Stringify) !void {
         switch (self) {
             .string => |s| try jws.write(s),

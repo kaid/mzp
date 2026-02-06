@@ -13,7 +13,6 @@ const Io = std.Io;
 
 pub const Transport = transport_mod.Transport;
 
-pub const ToolHandler = common.ToolHandler;
 pub const ToolCallMeta = common.ToolCallMeta;
 pub const CancellationToken = common.CancellationToken;
 
@@ -177,8 +176,8 @@ pub const Server = struct {
         self.inbound_queue = std.Io.Queue(*jsonrpc.Message).init(self.inbound_buf[0..]);
         self.run_group = .init;
 
-        try self.run_group.concurrent(io, readerMain, .{ self });
-        try self.run_group.concurrent(io, dispatcherMain, .{ self });
+        try self.run_group.concurrent(io, readerMain, .{self});
+        try self.run_group.concurrent(io, dispatcherMain, .{self});
 
         try self.run_group.await(io);
 
@@ -735,14 +734,16 @@ test "Server tool handler with user_data" {
         prefix: []const u8,
         saw: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     };
+    const EmptyArgs = struct {};
+    const EmptyArgsMapper = typed_codec.defaultMapper(EmptyArgs);
     var ctx = Ctx{ .prefix = "pfx:" };
 
-    try server.capabilities.tools.addWithUserData(.{
+    try server.capabilities.tools.addTyped(.{
         .name = "echo",
         .description = "Echo",
         .inputSchema = .{ .type = "object" },
-    }, struct {
-        fn handler(user_data: ?*anyopaque, _: []const u8, _: ?json.Value, _: ToolCallMeta, _: CancellationToken, allocator: std.mem.Allocator) anyerror!types.OwnedCallToolResult {
+    }, EmptyArgsMapper, struct {
+        fn handler(user_data: ?*anyopaque, _: []const u8, _: ?EmptyArgs, _: ToolCallMeta, _: CancellationToken, allocator: std.mem.Allocator) anyerror!types.OwnedCallToolResult {
             const c: *Ctx = @ptrCast(@alignCast(user_data.?));
             c.saw.store(true, .release);
             var result = types.OwnedCallToolResult.init(allocator);
@@ -782,13 +783,15 @@ test "Server tools/call runs synchronously when params.task is absent" {
     server.io = io;
 
     var saw = std.atomic.Value(bool).init(false);
+    const EmptyArgs = struct {};
+    const EmptyArgsMapper = typed_codec.defaultMapper(EmptyArgs);
 
-    try server.capabilities.tools.addWithUserData(.{
+    try server.capabilities.tools.addTyped(.{
         .name = "echo",
         .description = "Echo",
         .inputSchema = .{ .type = "object" },
-    }, struct {
-        fn handler(user_data: ?*anyopaque, _: []const u8, _: ?json.Value, _: ToolCallMeta, _: CancellationToken, allocator: std.mem.Allocator) anyerror!types.OwnedCallToolResult {
+    }, EmptyArgsMapper, struct {
+        fn handler(user_data: ?*anyopaque, _: []const u8, _: ?EmptyArgs, _: ToolCallMeta, _: CancellationToken, allocator: std.mem.Allocator) anyerror!types.OwnedCallToolResult {
             const flag: *std.atomic.Value(bool) = @ptrCast(@alignCast(user_data.?));
             flag.store(true, .release);
             var result = types.OwnedCallToolResult.init(allocator);
@@ -827,13 +830,15 @@ test "Server tool handler receives tools/call _meta.progressToken" {
     server.io = io;
 
     var saw = std.atomic.Value(bool).init(false);
+    const EmptyArgs = struct {};
+    const EmptyArgsMapper = typed_codec.defaultMapper(EmptyArgs);
 
-    try server.capabilities.tools.addWithUserData(.{
+    try server.capabilities.tools.addTyped(.{
         .name = "echo",
         .description = "Echo",
         .inputSchema = .{ .type = "object" },
-    }, struct {
-        fn handler(user_data: ?*anyopaque, _: []const u8, _: ?json.Value, meta: ToolCallMeta, _: CancellationToken, allocator: std.mem.Allocator) anyerror!types.OwnedCallToolResult {
+    }, EmptyArgsMapper, struct {
+        fn handler(user_data: ?*anyopaque, _: []const u8, _: ?EmptyArgs, meta: ToolCallMeta, _: CancellationToken, allocator: std.mem.Allocator) anyerror!types.OwnedCallToolResult {
             const flag: *std.atomic.Value(bool) = @ptrCast(@alignCast(user_data.?));
             var result = types.OwnedCallToolResult.init(allocator);
             if (meta.progressToken) |pt| switch (pt) {
@@ -1374,18 +1379,20 @@ test "Server tools/list includes inputSchema" {
         },
         .required = &[_][]const u8{"message"},
     };
+    const EmptyArgs = struct {};
+    const EmptyArgsMapper = typed_codec.defaultMapper(EmptyArgs);
 
-    try server.capabilities.tools.add(.{
+    try server.capabilities.tools.addTyped(.{
         .name = "echo",
         .description = "Echo",
         .inputSchema = schema,
-    }, struct {
-        fn handler(_: ?*anyopaque, _: []const u8, _: ?json.Value, _: ToolCallMeta, _: CancellationToken, allocator: std.mem.Allocator) anyerror!types.OwnedCallToolResult {
+    }, EmptyArgsMapper, struct {
+        fn handler(_: ?*anyopaque, _: []const u8, _: ?EmptyArgs, _: ToolCallMeta, _: CancellationToken, allocator: std.mem.Allocator) anyerror!types.OwnedCallToolResult {
             var result = types.OwnedCallToolResult.init(allocator);
             try result.addText("ok");
             return result;
         }
-    }.handler);
+    }.handler, null);
 
     try buffered.setInput("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n");
 

@@ -39,10 +39,6 @@ pub const Capability = struct {
         return self.tools.count();
     }
 
-    pub fn add(self: *Capability, tool: anytype, handler: common.ToolHandler) !void {
-        return self.addWithUserData(tool, handler, null);
-    }
-
     pub fn TypedToolHandler(comptime Args: type) type {
         return *const fn (
             user_data: ?*anyopaque,
@@ -57,21 +53,11 @@ pub const Capability = struct {
     pub fn addTyped(
         self: *Capability,
         tool: anytype,
-        comptime Args: type,
         comptime ArgsMapper: type,
-        comptime handler: TypedToolHandler(Args),
-    ) !void {
-        return self.addTypedWithUserData(tool, Args, ArgsMapper, handler, null);
-    }
-
-    pub fn addTypedWithUserData(
-        self: *Capability,
-        tool: anytype,
-        comptime Args: type,
-        comptime ArgsMapper: type,
-        comptime handler: TypedToolHandler(Args),
+        comptime handler: TypedToolHandler(ArgsMapper.TargetType),
         user_data: ?*anyopaque,
     ) !void {
+        const Args = ArgsMapper.TargetType;
         const Adapter = struct {
             fn bridge(
                 bridge_user_data: ?*anyopaque,
@@ -81,18 +67,22 @@ pub const Capability = struct {
                 cancel: common.CancellationToken,
                 allocator: std.mem.Allocator,
             ) anyerror!types.OwnedCallToolResult {
+                var arena = std.heap.ArenaAllocator.init(allocator);
+                defer arena.deinit();
+                const aa = arena.allocator();
+
                 const typed_args: ?Args = if (arguments) |raw_args|
-                    try typed_codec.valueToTyped(allocator, Args, ArgsMapper, raw_args)
+                    try typed_codec.valueToTyped(aa, Args, ArgsMapper, raw_args)
                 else
                     null;
                 return try handler(bridge_user_data, name, typed_args, meta, cancel, allocator);
             }
         };
 
-        try self.addWithUserData(tool, Adapter.bridge, user_data);
+        try self.registerWithUserData(tool, Adapter.bridge, user_data);
     }
 
-    pub fn addWithUserData(
+    fn registerWithUserData(
         self: *Capability,
         tool: anytype,
         handler: common.ToolHandler,
@@ -150,6 +140,10 @@ pub const Capability = struct {
         req: jsonrpc.Request,
         tasks: *tasks_mod.Capability,
     ) !void {
+        var parse_arena = std.heap.ArenaAllocator.init(server.getAllocator());
+        defer parse_arena.deinit();
+        const parse_allocator = parse_arena.allocator();
+
         const params = req.params orelse {
             try server.sendError(jsonrpc.Error.invalidParams(req.id, "Missing params"));
             return;
@@ -186,7 +180,7 @@ pub const Capability = struct {
 
         const arguments = params_obj.get("arguments");
 
-        var meta = parseToolCallMeta(params_obj.get("_meta"));
+        var meta = parseToolCallMeta(parse_allocator, params_obj.get("_meta"));
         meta.task = task_md;
 
         // tasks mode: only used when tasks are enabled and the client provided params.task.
@@ -234,23 +228,17 @@ pub const Capability = struct {
         _ = notif;
     }
 
-    fn parseToolCallMeta(meta_val: ?json.Value) common.ToolCallMeta {
-        const meta_obj = switch (meta_val orelse return .{}) {
-            .object => |o| o,
-            else => return .{},
-        };
+    fn parseToolCallMeta(allocator: std.mem.Allocator, meta_val: ?json.Value) common.ToolCallMeta {
+        const mv = meta_val orelse return .{};
 
-        const pt_val = meta_obj.get("progressToken") orelse return .{};
-        const progress_token: ?types.ProgressToken = switch (pt_val) {
-            .string => |s| .{ .string = s },
-            .integer => |n| .{ .number = n },
-            .number_string => |s| blk: {
-                const parsed = std.fmt.parseInt(i64, s, 10) catch break :blk null;
-                break :blk .{ .number = parsed };
-            },
-            else => null,
+        const WireMeta = struct {
+            progressToken: ?types.ProgressToken = null,
         };
+        const WireMetaMapper = typed_codec.defaultMapper(WireMeta);
 
-        return .{ .progressToken = progress_token };
+        const parsed = typed_codec.valueToTyped(allocator, WireMeta, WireMetaMapper, mv) catch return .{};
+        return .{
+            .progressToken = parsed.progressToken,
+        };
     }
 };

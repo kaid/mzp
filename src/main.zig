@@ -46,9 +46,9 @@ pub fn main(init: std.process.Init) !void {
             .description = "Echoes back the input",
             .inputSchema = schema,
         },
-        EchoArgs,
         EchoArgsMapper,
         echoHandler,
+        null,
     );
 
     try server.run(io);

@@ -334,7 +334,7 @@ pub const Message = union(enum) {
         };
     }
 
-    fn cloneValue(allocator: std.mem.Allocator, value: json.Value) !json.Value {
+    pub fn cloneValue(allocator: std.mem.Allocator, value: json.Value) !json.Value {
         return switch (value) {
             .null => .null,
             .bool => |b| .{ .bool = b },

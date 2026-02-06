@@ -4,12 +4,21 @@ const jsonrpc = @import("../../jsonrpc.zig");
 const types = @import("../../types.zig");
 const typed_codec = @import("../../serde/typed_codec.zig");
 
-pub const HandlerWithUserData = *const fn (
+const RawHandlerWithUserData = *const fn (
     user_data: ?*anyopaque,
     name: []const u8,
     arguments: ?json.Value,
     allocator: std.mem.Allocator,
 ) anyerror!types.OwnedGetPromptResult;
+
+pub fn TypedHandlerWithUserData(comptime Args: type) type {
+    return *const fn (
+        user_data: ?*anyopaque,
+        name: []const u8,
+        arguments: ?Args,
+        allocator: std.mem.Allocator,
+    ) anyerror!types.OwnedGetPromptResult;
+}
 
 pub const Capability = struct {
     allocator: std.mem.Allocator,
@@ -18,7 +27,7 @@ pub const Capability = struct {
 
     pub const PromptInfo = struct {
         prompt: types.Prompt,
-        handler: HandlerWithUserData,
+        handler: RawHandlerWithUserData,
         user_data: ?*anyopaque,
     };
 
@@ -39,10 +48,10 @@ pub const Capability = struct {
         return self.prompts.count();
     }
 
-    pub fn addWithUserData(
+    fn registerWithUserData(
         self: *Capability,
         prompt: types.Prompt,
-        handler: HandlerWithUserData,
+        handler: RawHandlerWithUserData,
         user_data: ?*anyopaque,
     ) !void {
         try self.prompts.put(prompt.name, .{
@@ -52,8 +61,34 @@ pub const Capability = struct {
         });
     }
 
-    pub fn add(self: *Capability, prompt: types.Prompt, handler: HandlerWithUserData) !void {
-        return self.addWithUserData(prompt, handler, null);
+    pub fn addTyped(
+        self: *Capability,
+        prompt: types.Prompt,
+        comptime ArgsMapper: type,
+        comptime handler: TypedHandlerWithUserData(ArgsMapper.TargetType),
+        user_data: ?*anyopaque,
+    ) !void {
+        const Args = ArgsMapper.TargetType;
+        const Adapter = struct {
+            fn bridge(
+                bridge_user_data: ?*anyopaque,
+                name: []const u8,
+                arguments: ?json.Value,
+                allocator: std.mem.Allocator,
+            ) anyerror!types.OwnedGetPromptResult {
+                var arena = std.heap.ArenaAllocator.init(allocator);
+                defer arena.deinit();
+                const aa = arena.allocator();
+
+                const typed_args: ?Args = if (arguments) |raw_args|
+                    try typed_codec.valueToTyped(aa, Args, ArgsMapper, raw_args)
+                else
+                    null;
+                return try handler(bridge_user_data, name, typed_args, allocator);
+            }
+        };
+
+        try self.registerWithUserData(prompt, Adapter.bridge, user_data);
     }
 
     pub fn handleList(self: *Capability, server: anytype, req: jsonrpc.Request) !void {
