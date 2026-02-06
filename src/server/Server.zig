@@ -1338,7 +1338,8 @@ test "Server notifications/tasks/status params are task fields directly" {
         .status = .running,
         .createdAt = "2026-02-05T00:00:00Z",
         .updatedAt = "2026-02-05T00:00:01Z",
-        .metadata = .{ .ttl = 60000, .pollInterval = null },
+        .ttl = 60000,
+        .pollInterval = null,
     };
 
     try server.sendNotification("notifications/tasks/status", task);

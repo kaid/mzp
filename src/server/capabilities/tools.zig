@@ -192,7 +192,9 @@ pub const Capability = struct {
         const arguments = params_obj.get("arguments");
 
         var meta = parseToolCallMeta(parse_allocator, params_obj.get("_meta"));
-        meta.task = task_md;
+        if (task_md) |tm| {
+            meta.ttl = tm.ttl;
+        }
 
         // tasks mode: only used when tasks are enabled and the client provided params.task.
         if (tasks.enabled and task_md != null) {

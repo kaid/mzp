@@ -214,7 +214,12 @@ pub const Capability = struct {
         self.task_order.clearRetainingCapacity();
     }
 
-    pub fn createTask(self: *Capability, md: types.TaskMetadata) !*TaskRecord {
+    pub const TaskParams = struct {
+        ttl: ?u64 = null,
+        pollInterval: ?u64 = null,
+    };
+
+    pub fn createTask(self: *Capability, params: TaskParams) !*TaskRecord {
         self.tasks_mutex.lock();
         defer self.tasks_mutex.unlock();
 
@@ -240,7 +245,8 @@ pub const Capability = struct {
                 .status = .running,
                 .createdAt = created_at,
                 .updatedAt = updated_at,
-                .metadata = md,
+                .ttl = params.ttl,
+                .pollInterval = params.pollInterval,
             },
         };
 
@@ -573,7 +579,7 @@ pub const Capability = struct {
     }
 };
 
-pub fn parseTaskMetadataValue(task_val: ?json.Value) !?types.TaskMetadata {
+pub fn parseTaskMetadataValue(task_val: ?json.Value) !?Capability.TaskParams {
     const tv = task_val orelse return null;
     if (tv == .null) return null;
     if (tv != .object) return error.InvalidTaskMetadata;

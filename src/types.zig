@@ -844,67 +844,21 @@ pub const TaskStatus = enum {
     }
 };
 
-pub const TaskMetadata = struct {
-    ttl: ?u64 = null,
-    pollInterval: ?u64 = null,
-
-    pub const Mapper = izo.Mapper(TaskMetadata, .{
-        .ttl = .{ .omit_null = true },
-        .pollInterval = .{ .omit_null = true },
-    });
-
-    pub fn jsonStringify(self: TaskMetadata, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
-};
-
 pub const Task = struct {
     id: []const u8,
     status: TaskStatus,
     createdAt: []const u8,
     updatedAt: []const u8,
     statusMessage: ?[]const u8 = null,
-    metadata: ?TaskMetadata = null,
+    ttl: ?u64 = null,
+    pollInterval: ?u64 = null,
 
-    pub const Mapper = struct {
-        pub const Adapter = struct {
-            value: Task,
-            pub fn jsonStringify(self: @This(), jws: *json.Stringify) !void {
-                try jws.beginObject();
-                try jws.objectField("taskId");
-                try jws.write(self.value.id);
-                try jws.objectField("status");
-                try self.value.status.jsonStringify(jws);
-                try jws.objectField("createdAt");
-                try jws.write(self.value.createdAt);
-                try jws.objectField("lastUpdatedAt");
-                try jws.write(self.value.updatedAt);
-
-                try jws.objectField("ttl");
-                if (self.value.metadata) |md| {
-                    try jws.write(md.ttl);
-                } else {
-                    try jws.write(null);
-                }
-
-                if (self.value.metadata) |md| {
-                    if (md.pollInterval) |pi| {
-                        try jws.objectField("pollInterval");
-                        try jws.write(pi);
-                    }
-                }
-
-                if (self.value.statusMessage) |m| {
-                    try jws.objectField("statusMessage");
-                    try jws.write(m);
-                }
-                try jws.endObject();
-            }
-        };
-        pub fn adapter(value: Task) Adapter {
-            return .{ .value = value };
-        }
-    };
+    pub const Mapper = izo.Mapper(Task, .{
+        .id = .{ .alias = "taskId" },
+        .updatedAt = .{ .alias = "lastUpdatedAt" },
+        .statusMessage = .{ .omit_null = true },
+        .pollInterval = .{ .omit_null = true },
+    });
 
     pub fn jsonStringify(self: Task, jws: *json.Stringify) !void {
         try Mapper.adapter(self).jsonStringify(jws);
@@ -984,7 +938,8 @@ test "Task stringify uses taskId/lastUpdatedAt and includes ttl" {
         .status = .running,
         .createdAt = "2026-02-05T00:00:00Z",
         .updatedAt = "2026-02-05T00:00:01Z",
-        .metadata = .{ .ttl = null, .pollInterval = 500 },
+        .ttl = null,
+        .pollInterval = 500,
     };
 
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
@@ -1007,7 +962,8 @@ test "Task stringify omits pollInterval when null" {
         .status = .running,
         .createdAt = "2026-02-05T00:00:00Z",
         .updatedAt = "2026-02-05T00:00:01Z",
-        .metadata = .{ .ttl = 60000, .pollInterval = null },
+        .ttl = 60000,
+        .pollInterval = null,
     };
 
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);

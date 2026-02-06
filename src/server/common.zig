@@ -5,8 +5,8 @@ const types = @import("../types.zig");
 pub const ToolCallMeta = struct {
     /// Progress token forwarded from `tools/call` params._meta.progressToken (if present).
     progressToken: ?types.ProgressToken = null,
-    /// Task metadata forwarded from `tools/call` params.task (if present).
-    task: ?types.TaskMetadata = null,
+    /// Task TTL forwarded from `tools/call` params.task (if present).
+    ttl: ?u64 = null,
 };
 
 pub const CancellationToken = struct {
@@ -25,4 +25,3 @@ pub const ToolHandler = *const fn (
     cancel: CancellationToken,
     allocator: std.mem.Allocator,
 ) anyerror!types.OwnedCallToolResult;
-
