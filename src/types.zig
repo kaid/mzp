@@ -137,10 +137,17 @@ pub const ServerCapabilities = struct {
 
 pub const RootsCapability = struct {
     list_changed: bool = false,
+
+    pub const Mapper = izo.Mapper(RootsCapability, .{
+        .list_changed = .{ .alias = "listChanged", .omit_default = true },
+    });
+
+    pub fn jsonStringify(self: RootsCapability, jws: *json.Stringify) !void {
+        try Mapper.adapter(self).jsonStringify(jws);
+    }
 };
 
 pub const SamplingCapability = struct {};
-
 pub const ElicitationCapability = struct {};
 
 pub const ClientCapabilities = struct {
@@ -150,36 +157,16 @@ pub const ClientCapabilities = struct {
     tasks: ?TasksCapability = null,
     experimental: ?json.Value = null,
 
+    pub const Mapper = izo.Mapper(ClientCapabilities, .{
+        .roots = .{ .omit_null = true, .nested = RootsCapability.Mapper },
+        .sampling = .{ .omit_null = true },
+        .elicitation = .{ .omit_null = true },
+        .tasks = .{ .omit_null = true, .nested = TasksCapability.Mapper },
+        .experimental = .{ .omit_null = true },
+    });
+
     pub fn jsonStringify(self: ClientCapabilities, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        if (self.roots) |r| {
-            try jws.objectField("roots");
-            try jws.beginObject();
-            if (r.list_changed) {
-                try jws.objectField("listChanged");
-                try jws.write(true);
-            }
-            try jws.endObject();
-        }
-        if (self.sampling != null) {
-            try jws.objectField("sampling");
-            try jws.beginObject();
-            try jws.endObject();
-        }
-        if (self.elicitation != null) {
-            try jws.objectField("elicitation");
-            try jws.beginObject();
-            try jws.endObject();
-        }
-        if (self.tasks) |t| {
-            try jws.objectField("tasks");
-            try t.jsonStringify(jws);
-        }
-        if (self.experimental) |e| {
-            try jws.objectField("experimental");
-            try jws.write(e);
-        }
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -195,19 +182,14 @@ pub const InitializeResult = struct {
     serverInfo: Implementation,
     instructions: ?[]const u8 = null,
 
+    pub const Mapper = izo.Mapper(InitializeResult, .{
+        .capabilities = .{ .nested = ServerCapabilities.Mapper },
+        .serverInfo = .{ .nested = Implementation.Mapper },
+        .instructions = .{ .omit_null = true },
+    });
+
     pub fn jsonStringify(self: InitializeResult, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("protocolVersion");
-        try jws.write(self.protocolVersion);
-        try jws.objectField("capabilities");
-        try self.capabilities.jsonStringify(jws);
-        try jws.objectField("serverInfo");
-        try self.serverInfo.jsonStringify(jws);
-        if (self.instructions) |i| {
-            try jws.objectField("instructions");
-            try jws.write(i);
-        }
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -233,15 +215,12 @@ pub fn freeRoot(allocator: std.mem.Allocator, root: Root) void {
 pub const ListRootsResult = struct {
     roots: []const Root,
 
+    pub const Mapper = izo.Mapper(ListRootsResult, .{
+        .roots = .{ .element_mapper = Root.Mapper },
+    });
+
     pub fn jsonStringify(self: ListRootsResult, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("roots");
-        try jws.beginArray();
-        for (self.roots) |r| {
-            try r.jsonStringify(jws);
-        }
-        try jws.endArray();
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -277,8 +256,9 @@ pub const OwnedListRootsResult = struct {
     }
 
     pub fn jsonStringify(self: OwnedListRootsResult, jws: *json.Stringify) !void {
-        const view = ListRootsResult{ .roots = self.roots.items };
-        try view.jsonStringify(jws);
+        try ListRootsResult.Mapper.adapter(.{
+            .roots = self.roots.items,
+        }).jsonStringify(jws);
     }
 };
 
@@ -373,11 +353,23 @@ pub const ContentBlock = union(enum) {
     text: TextContent,
     image: ImageContent,
 
-    pub fn jsonStringify(self: ContentBlock, jws: *json.Stringify) !void {
-        switch (self) {
-            .text => |t| try jws.write(TextContentMapper.adapter(t)),
-            .image => |i| try jws.write(ImageContentMapper.adapter(i)),
+    pub const Mapper = struct {
+        pub const Adapter = struct {
+            value: ContentBlock,
+            pub fn jsonStringify(self: @This(), jws: *json.Stringify) !void {
+                switch (self.value) {
+                    .text => |t| try jws.write(TextContentMapper.adapter(t)),
+                    .image => |i| try jws.write(ImageContentMapper.adapter(i)),
+                }
+            }
+        };
+        pub fn adapter(value: ContentBlock) Adapter {
+            return .{ .value = value };
         }
+    };
+
+    pub fn jsonStringify(self: ContentBlock, jws: *json.Stringify) !void {
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -385,19 +377,13 @@ pub const CallToolResult = struct {
     content: []const ContentBlock,
     isError: bool = false,
 
+    pub const Mapper = izo.Mapper(CallToolResult, .{
+        .content = .{ .element_mapper = ContentBlock.Mapper },
+        .isError = .{ .omit_default = true },
+    });
+
     pub fn jsonStringify(self: CallToolResult, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("content");
-        try jws.beginArray();
-        for (self.content) |c| {
-            try c.jsonStringify(jws);
-        }
-        try jws.endArray();
-        if (self.isError) {
-            try jws.objectField("isError");
-            try jws.write(true);
-        }
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -445,11 +431,10 @@ pub const OwnedCallToolResult = struct {
     }
 
     pub fn jsonStringify(self: OwnedCallToolResult, jws: *json.Stringify) !void {
-        const view = CallToolResult{
+        try CallToolResult.Mapper.adapter(.{
             .content = self.content.items,
             .isError = self.isError,
-        };
-        try view.jsonStringify(jws);
+        }).jsonStringify(jws);
     }
 };
 
@@ -515,26 +500,35 @@ pub const ResourceContents = union(enum) {
     text: TextResourceContents,
     blob: BlobResourceContents,
 
-    pub fn jsonStringify(self: ResourceContents, jws: *json.Stringify) !void {
-        switch (self) {
-            .text => |t| try t.jsonStringify(jws),
-            .blob => |b| try b.jsonStringify(jws),
+    pub const Mapper = struct {
+        pub const Adapter = struct {
+            value: ResourceContents,
+            pub fn jsonStringify(self: @This(), jws: *json.Stringify) !void {
+                switch (self.value) {
+                    .text => |t| try TextResourceContents.Mapper.adapter(t).jsonStringify(jws),
+                    .blob => |b| try BlobResourceContents.Mapper.adapter(b).jsonStringify(jws),
+                }
+            }
+        };
+        pub fn adapter(value: ResourceContents) Adapter {
+            return .{ .value = value };
         }
+    };
+
+    pub fn jsonStringify(self: ResourceContents, jws: *json.Stringify) !void {
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
 pub const ReadResourceResult = struct {
     contents: []const ResourceContents,
 
+    pub const Mapper = izo.Mapper(ReadResourceResult, .{
+        .contents = .{ .element_mapper = ResourceContents.Mapper },
+    });
+
     pub fn jsonStringify(self: ReadResourceResult, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("contents");
-        try jws.beginArray();
-        for (self.contents) |c| {
-            try c.jsonStringify(jws);
-        }
-        try jws.endArray();
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -605,8 +599,9 @@ pub const OwnedReadResourceResult = struct {
     }
 
     pub fn jsonStringify(self: OwnedReadResourceResult, jws: *json.Stringify) !void {
-        const view = ReadResourceResult{ .contents = self.contents.items };
-        try view.jsonStringify(jws);
+        try ReadResourceResult.Mapper.adapter(.{
+            .contents = self.contents.items,
+        }).jsonStringify(jws);
     }
 };
 
@@ -728,11 +723,10 @@ pub const OwnedGetPromptResult = struct {
     }
 
     pub fn jsonStringify(self: OwnedGetPromptResult, jws: *json.Stringify) !void {
-        const view = GetPromptResult{
+        try GetPromptResult.Mapper.adapter(.{
             .description = self.description,
             .messages = self.messages.items,
-        };
-        try view.jsonStringify(jws);
+        }).jsonStringify(jws);
     }
 };
 
@@ -754,11 +748,10 @@ pub const LoggingLevel = enum {
 pub const LoggingSetLevelParams = struct {
     level: LoggingLevel,
 
+    pub const Mapper = izo.Mapper(LoggingSetLevelParams, .{});
+
     pub fn jsonStringify(self: LoggingSetLevelParams, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("level");
-        try self.level.jsonStringify(jws);
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -771,17 +764,12 @@ pub const LoggingMessageParams = struct {
     logger: ?[]const u8 = null,
     data: json.Value,
 
+    pub const Mapper = izo.Mapper(LoggingMessageParams, .{
+        .logger = .{ .omit_null = true },
+    });
+
     pub fn jsonStringify(self: LoggingMessageParams, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("level");
-        try self.level.jsonStringify(jws);
-        if (self.logger) |l| {
-            try jws.objectField("logger");
-            try jws.write(l);
-        }
-        try jws.objectField("data");
-        try jws.write(self.data);
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -800,11 +788,23 @@ pub const ProgressToken = union(enum) {
         }
     }
 
-    pub fn jsonStringify(self: ProgressToken, jws: *json.Stringify) !void {
-        switch (self) {
-            .string => |s| try jws.write(s),
-            .number => |n| try jws.write(n),
+    pub const Mapper = struct {
+        pub const Adapter = struct {
+            value: ProgressToken,
+            pub fn jsonStringify(self: @This(), jws: *json.Stringify) !void {
+                switch (self.value) {
+                    .string => |s| try jws.write(s),
+                    .number => |n| try jws.write(n),
+                }
+            }
+        };
+        pub fn adapter(value: ProgressToken) Adapter {
+            return .{ .value = value };
         }
+    };
+
+    pub fn jsonStringify(self: ProgressToken, jws: *json.Stringify) !void {
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -814,21 +814,13 @@ pub const ProgressParams = struct {
     total: ?f64 = null,
     message: ?[]const u8 = null,
 
+    pub const Mapper = izo.Mapper(ProgressParams, .{
+        .total = .{ .omit_null = true },
+        .message = .{ .omit_null = true },
+    });
+
     pub fn jsonStringify(self: ProgressParams, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("progressToken");
-        try self.progressToken.jsonStringify(jws);
-        try jws.objectField("progress");
-        try jws.write(self.progress);
-        if (self.total) |t| {
-            try jws.objectField("total");
-            try jws.write(t);
-        }
-        if (self.message) |m| {
-            try jws.objectField("message");
-            try jws.write(m);
-        }
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -856,17 +848,13 @@ pub const TaskMetadata = struct {
     ttl: ?u64 = null,
     pollInterval: ?u64 = null,
 
+    pub const Mapper = izo.Mapper(TaskMetadata, .{
+        .ttl = .{ .omit_null = true },
+        .pollInterval = .{ .omit_null = true },
+    });
+
     pub fn jsonStringify(self: TaskMetadata, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        if (self.ttl) |ttl| {
-            try jws.objectField("ttl");
-            try jws.write(ttl);
-        }
-        if (self.pollInterval) |pi| {
-            try jws.objectField("pollInterval");
-            try jws.write(pi);
-        }
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -878,49 +866,60 @@ pub const Task = struct {
     statusMessage: ?[]const u8 = null,
     metadata: ?TaskMetadata = null,
 
+    pub const Mapper = struct {
+        pub const Adapter = struct {
+            value: Task,
+            pub fn jsonStringify(self: @This(), jws: *json.Stringify) !void {
+                try jws.beginObject();
+                try jws.objectField("taskId");
+                try jws.write(self.value.id);
+                try jws.objectField("status");
+                try self.value.status.jsonStringify(jws);
+                try jws.objectField("createdAt");
+                try jws.write(self.value.createdAt);
+                try jws.objectField("lastUpdatedAt");
+                try jws.write(self.value.updatedAt);
+
+                try jws.objectField("ttl");
+                if (self.value.metadata) |md| {
+                    try jws.write(md.ttl);
+                } else {
+                    try jws.write(null);
+                }
+
+                if (self.value.metadata) |md| {
+                    if (md.pollInterval) |pi| {
+                        try jws.objectField("pollInterval");
+                        try jws.write(pi);
+                    }
+                }
+
+                if (self.value.statusMessage) |m| {
+                    try jws.objectField("statusMessage");
+                    try jws.write(m);
+                }
+                try jws.endObject();
+            }
+        };
+        pub fn adapter(value: Task) Adapter {
+            return .{ .value = value };
+        }
+    };
+
     pub fn jsonStringify(self: Task, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        // MCP schema (protocolVersion 2025-11-25): taskId + lastUpdatedAt + ttl.
-        try jws.objectField("taskId");
-        try jws.write(self.id);
-        try jws.objectField("status");
-        try self.status.jsonStringify(jws);
-        try jws.objectField("createdAt");
-        try jws.write(self.createdAt);
-        try jws.objectField("lastUpdatedAt");
-        try jws.write(self.updatedAt);
-        try jws.objectField("ttl");
-        if (self.metadata) |md| {
-            if (md.ttl) |ttl| {
-                try jws.write(ttl);
-            } else {
-                try jws.write(null);
-            }
-        } else {
-            try jws.write(null);
-        }
-        if (self.metadata) |md| {
-            if (md.pollInterval) |pi| {
-                try jws.objectField("pollInterval");
-                try jws.write(pi);
-            }
-        }
-        if (self.statusMessage) |m| {
-            try jws.objectField("statusMessage");
-            try jws.write(m);
-        }
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
 pub const CreateTaskResult = struct {
     task: Task,
 
+    pub const Mapper = izo.Mapper(CreateTaskResult, .{
+        .task = .{ .nested = Task.Mapper },
+    });
+
     pub fn jsonStringify(self: CreateTaskResult, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("task");
-        try self.task.jsonStringify(jws);
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
@@ -928,19 +927,13 @@ pub const ListTasksResult = struct {
     tasks: []const Task,
     nextCursor: ?[]const u8 = null,
 
+    pub const Mapper = izo.Mapper(ListTasksResult, .{
+        .tasks = .{ .element_mapper = Task.Mapper },
+        .nextCursor = .{ .omit_null = true },
+    });
+
     pub fn jsonStringify(self: ListTasksResult, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("tasks");
-        try jws.beginArray();
-        for (self.tasks) |t| {
-            try t.jsonStringify(jws);
-        }
-        try jws.endArray();
-        if (self.nextCursor) |c| {
-            try jws.objectField("nextCursor");
-            try jws.write(c);
-        }
-        try jws.endObject();
+        try Mapper.adapter(self).jsonStringify(jws);
     }
 };
 
