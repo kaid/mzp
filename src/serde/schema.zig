@@ -1,8 +1,9 @@
 const std = @import("std");
 const izo = @import("izomorph");
+const json = std.json;
 
 pub const JsonSchema = struct {
-    type: []const u8,
+    type: ?[]const u8 = null,
     properties: ?[]const Property = null,
     required: ?[]const []const u8 = null,
     items: ?*const JsonSchema = null,
@@ -24,6 +25,11 @@ pub fn generate(comptime T: type) JsonSchema {
 }
 
 fn generateSchema(comptime T: type) JsonSchema {
+    // Special case: json.Value accepts any JSON value
+    if (T == json.Value) {
+        return JsonSchema{};
+    }
+
     const info = @typeInfo(T);
 
     return switch (info) {
@@ -96,12 +102,19 @@ fn generateEnumSchema(comptime T: type) JsonSchema {
     };
 }
 
+/// Schema for json.Value - accepts any JSON value
+fn generateAnyValueSchema() JsonSchema {
+    return .{};
+}
+
 // ==================== Tests ====================
 
 fn writeJsonSchema(jws: *std.json.Stringify, schema: JsonSchema) !void {
     try jws.beginObject();
-    try jws.objectField("type");
-    try jws.write(schema.type);
+    if (schema.type) |t| {
+        try jws.objectField("type");
+        try jws.write(t);
+    }
 
     if (schema.properties) |props| {
         try jws.objectField("properties");
@@ -193,4 +206,23 @@ test "generate schema for array" {
 test "generate schema for empty struct" {
     const Empty = struct {};
     try expectSchema(Empty, "{\"type\":\"object\",\"properties\":{}}");
+}
+
+test "generate schema for struct with json.Value" {
+    const Args = struct {
+        message: []const u8,
+        extra: json.Value,
+    };
+    try expectSchema(Args, "{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\"},\"extra\":{}},\"required\":[\"message\",\"extra\"]}");
+}
+
+test "generate schema for json.Value field" {
+    const js = generate(json.Value);
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer aw.deinit();
+    var jws: std.json.Stringify = .{ .writer = &aw.writer };
+
+    try writeJsonSchema(&jws, js);
+    try aw.writer.flush();
+    try std.testing.expectEqualStrings("{}", aw.written());
 }
