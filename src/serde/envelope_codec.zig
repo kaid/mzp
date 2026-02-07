@@ -1,6 +1,7 @@
 const std = @import("std");
 const json = std.json;
 const jsonrpc = @import("../jsonrpc.zig");
+const izo = @import("izomorph");
 
 const Io = std.Io;
 
@@ -23,7 +24,7 @@ pub fn encodeRequestAlloc(
     try jws.write(method);
     if (@TypeOf(params) != @TypeOf(null)) {
         try jws.objectField("params");
-        try writeRequestParams(&jws, params);
+        try writeRequestParams(allocator, &jws, params);
     }
     try jws.endObject();
 
@@ -49,7 +50,7 @@ pub fn encodeNotificationAlloc(
     try jws.write(method);
     if (@TypeOf(params) != @TypeOf(null)) {
         try jws.objectField("params");
-        try writeRequestParams(&jws, params);
+        try writeRequestParams(allocator, &jws, params);
     }
     try jws.endObject();
 
@@ -74,7 +75,7 @@ pub fn encodeResponseAlloc(
     try jws.objectField("id");
     try id.jsonStringify(&jws);
     try jws.objectField("result");
-    try writeRequestValue(&jws, result);
+    try writeRequestValue(allocator, &jws, result);
     try jws.endObject();
 
     try aw.writer.flush();
@@ -99,51 +100,44 @@ pub fn encodeErrorAlloc(
     return out;
 }
 
-fn writeRequestParams(jws: *json.Stringify, params: anytype) !void {
+fn writeRequestParams(allocator: std.mem.Allocator, jws: *json.Stringify, params: anytype) !void {
     const T = @TypeOf(params);
     if (T == json.Value) {
         try jws.write(params);
     } else if (@typeInfo(T) == .optional) {
         if (params) |p| {
-            try writeRequestParams(jws, p);
+            try writeRequestParams(allocator, jws, p);
         } else {
             try jws.write(null);
         }
     } else if (@typeInfo(T) == .@"struct") {
-        // If type has custom jsonStringify, use it
-        if (@hasDecl(T, "jsonStringify")) {
-            try params.jsonStringify(jws);
-        } else {
-            // Otherwise iterate fields with omit_null behavior
-            try jws.beginObject();
-            inline for (@typeInfo(T).@"struct".fields) |field| {
-                const field_value = @field(params, field.name);
-                const FieldType = @TypeOf(field_value);
-                if (@typeInfo(FieldType) == .optional) {
-                    if (field_value != null) {
-                        try jws.objectField(field.name);
-                        try writeRequestValue(jws, field_value.?);
-                    }
-                } else {
-                    try jws.objectField(field.name);
-                    try writeRequestValue(jws, field_value);
-                }
-            }
-            try jws.endObject();
-        }
+        // Use izo.json.encode for struct types
+        const Mapper = if (@hasDecl(T, "Mapper")) T.Mapper else izo.Mapper(T, .{});
+        const json_str = try izo.json.encode(allocator, params, Mapper, .{});
+        defer allocator.free(json_str);
+        var parsed = try std.json.parseFromSlice(json.Value, allocator, json_str, .{});
+        defer parsed.deinit();
+        try jws.write(parsed.value);
     } else {
         try jws.write(params);
     }
 }
 
-fn writeRequestValue(jws: *json.Stringify, value: anytype) !void {
+fn writeRequestValue(allocator: std.mem.Allocator, jws: *json.Stringify, value: anytype) !void {
     const T = @TypeOf(value);
+    // For struct/enum/union types, use izo.json.encode
     const is_container = switch (@typeInfo(T)) {
-        .@"struct", .@"enum", .@"union", .@"opaque" => true,
+        .@"struct", .@"enum", .@"union" => true,
         else => false,
     };
-    if (is_container and @hasDecl(T, "jsonStringify")) {
-        try value.jsonStringify(jws);
+    if (is_container) {
+        // Use Mapper if available, otherwise create a default one
+        const Mapper = if (@hasDecl(T, "Mapper")) T.Mapper else izo.Mapper(T, .{});
+        const json_str = try izo.json.encode(allocator, value, Mapper, .{});
+        defer allocator.free(json_str);
+        var parsed = try std.json.parseFromSlice(json.Value, allocator, json_str, .{});
+        defer parsed.deinit();
+        try jws.write(parsed.value);
     } else {
         try jws.write(value);
     }

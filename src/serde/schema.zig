@@ -13,48 +13,8 @@ pub const JsonSchema = struct {
         schema: JsonSchema,
     };
 
-    pub const Mapper = izo.Mapper(JsonSchema, .{
-        .properties = .{ .omit_null = true, .nested = PropertiesAdapter },
-        .required = .{ .omit_null = true },
-        .items = .{ .omit_null = true, .nested = ItemsAdapter },
-        .@"enum" = .{ .alias = "enum", .omit_null = true },
-    });
-
     pub fn jsonStringify(self: JsonSchema, jws: *std.json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
-};
-
-pub const PropertiesAdapter = struct {
-    pub const Adapter = struct {
-        value: []const JsonSchema.Property,
-
-        pub fn jsonStringify(self: @This(), jws: *std.json.Stringify) !void {
-            try jws.beginObject();
-            for (self.value) |prop| {
-                try jws.objectField(prop.name);
-                try prop.schema.jsonStringify(jws);
-            }
-            try jws.endObject();
-        }
-    };
-
-    pub fn adapter(value: []const JsonSchema.Property) Adapter {
-        return .{ .value = value };
-    }
-};
-
-pub const ItemsAdapter = struct {
-    pub const Adapter = struct {
-        value: *const JsonSchema,
-
-        pub fn jsonStringify(self: @This(), jws: *std.json.Stringify) !void {
-            try self.value.jsonStringify(jws);
-        }
-    };
-
-    pub fn adapter(value: *const JsonSchema) Adapter {
-        return .{ .value = value };
+        try writeJsonSchema(jws, self);
     }
 };
 
@@ -138,12 +98,47 @@ fn generateEnumSchema(comptime T: type) JsonSchema {
 
 // ==================== Tests ====================
 
+fn writeJsonSchema(jws: *std.json.Stringify, schema: JsonSchema) !void {
+    try jws.beginObject();
+    try jws.objectField("type");
+    try jws.write(schema.type);
+
+    if (schema.properties) |props| {
+        try jws.objectField("properties");
+        try jws.beginObject();
+        for (props) |prop| {
+            try jws.objectField(prop.name);
+            try writeJsonSchema(jws, prop.schema);
+        }
+        try jws.endObject();
+    }
+
+    if (schema.required) |req| {
+        try jws.objectField("required");
+        try jws.write(req);
+    }
+
+    if (schema.items) |items| {
+        try jws.objectField("items");
+        try writeJsonSchema(jws, items.*);
+    }
+
+    if (schema.@"enum") |enum_vals| {
+        try jws.objectField("enum");
+        try jws.write(enum_vals);
+    }
+
+    try jws.endObject();
+}
+
 fn expectSchema(comptime T: type, expected: []const u8) !void {
     const js = generate(T);
     var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer aw.deinit();
     var jws: std.json.Stringify = .{ .writer = &aw.writer };
-    try js.jsonStringify(&jws);
+
+    try writeJsonSchema(&jws, js);
+    try aw.writer.flush();
     try std.testing.expectEqualStrings(expected, aw.written());
 }
 

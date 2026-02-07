@@ -270,36 +270,54 @@ pub const Server = struct {
     /// Sends `roots/list` to the connected client and returns the client's current roots.
     /// Caller owns the returned value and must call `deinit()`.
     pub fn listRoots(self: *Server) !types.OwnedListRootsResult {
-        var arena = std.heap.ArenaAllocator.init(self.getAllocator());
-        defer arena.deinit();
-        const a = arena.allocator();
-
-        const decoded = try self.requestClientTypedWithAllocator(
-            a,
-            WireListRootsResult,
-            WireListRootsResultMapper,
-            "roots/list",
-            null,
-            null,
-        );
-        return try ownedRootsFromWire(self.allocator, decoded.roots);
+        return try self.listRootsWithTimeout(null);
     }
 
     /// Like `listRoots` but allows overriding the timeout for this call.
     pub fn listRootsWithTimeout(self: *Server, timeout: ?Io.Clock.Duration) !types.OwnedListRootsResult {
-        var arena = std.heap.ArenaAllocator.init(self.getAllocator());
-        defer arena.deinit();
-        const a = arena.allocator();
+        const result_value = try self.requestClient("roots/list", null, timeout);
+        defer jsonrpc.Message.freeValue(self.getAllocator(), result_value);
 
-        const decoded = try self.requestClientTypedWithAllocator(
-            a,
-            WireListRootsResult,
-            WireListRootsResultMapper,
-            "roots/list",
-            null,
-            timeout,
-        );
-        return try ownedRootsFromWire(self.allocator, decoded.roots);
+        // Parse result directly from json.Value
+        return try parseListRootsResult(self.allocator, result_value);
+    }
+
+    fn parseListRootsResult(allocator: std.mem.Allocator, value: json.Value) !types.OwnedListRootsResult {
+        const obj = switch (value) {
+            .object => |o| o,
+            else => return error.InvalidResponse,
+        };
+
+        var result = types.OwnedListRootsResult.init(allocator);
+        errdefer result.deinit();
+
+        const roots_val = obj.get("roots") orelse return error.InvalidResponse;
+        const roots_arr = switch (roots_val) {
+            .array => |a| a,
+            else => return error.InvalidResponse,
+        };
+
+        for (roots_arr.items) |root_val| {
+            const root_obj = switch (root_val) {
+                .object => |o| o,
+                else => continue,
+            };
+
+            const uri_val = root_obj.get("uri") orelse continue;
+            const uri = switch (uri_val) {
+                .string => |s| s,
+                else => continue,
+            };
+
+            const name: ?[]const u8 = if (root_obj.get("name")) |nv| switch (nv) {
+                .string => |s| s,
+                else => null,
+            } else null;
+
+            try result.addRoot(uri, name);
+        }
+
+        return result;
     }
 
     pub fn handleMessage(self: *Server, msg: jsonrpc.Message) !void {
@@ -351,31 +369,72 @@ pub const Server = struct {
 
         if (req.params) |params| {
             if (params == .object) {
-                const parsed = typed_codec.valueToTyped(
-                    self.allocator,
-                    WireInitializeRequestParams,
-                    WireInitializeRequestParamsMapper,
-                    params,
-                ) catch null;
-                if (parsed) |p| {
-                    if (p.protocolVersion) |pv| {
+                const obj = params.object;
+
+                // Parse protocolVersion
+                if (obj.get("protocolVersion")) |pv_val| {
+                    if (pv_val == .string) {
+                        const pv = try self.allocator.dupe(u8, pv_val.string);
                         if (self.negotiated_version_owned) |v| self.allocator.free(v);
-                        self.negotiated_version_owned = @constCast(pv);
+                        self.negotiated_version_owned = pv;
                         self.negotiated_version = pv;
                     }
-                    if (p.clientInfo) |info| {
-                        if (self.client_info_owned) {
-                            if (self.client_info) |old| freeImplementation(self.allocator, old);
+                }
+
+                // Parse clientInfo
+                if (obj.get("clientInfo")) |ci_val| {
+                    if (ci_val == .object) {
+                        const ci_obj = ci_val.object;
+                        if (ci_obj.get("name")) |name_val| {
+                            if (ci_obj.get("version")) |version_val| {
+                                if (name_val == .string and version_val == .string) {
+                                    if (self.client_info_owned) {
+                                        if (self.client_info) |old| freeImplementation(self.allocator, old);
+                                    }
+                                    const name = try self.allocator.dupe(u8, name_val.string);
+                                    errdefer self.allocator.free(name);
+                                    const version = try self.allocator.dupe(u8, version_val.string);
+                                    errdefer self.allocator.free(version);
+                                    const title: ?[]u8 = if (ci_obj.get("title")) |tv| switch (tv) {
+                                        .string => |s| try self.allocator.dupe(u8, s),
+                                        else => null,
+                                    } else null;
+                                    errdefer if (title) |t| self.allocator.free(t);
+                                    self.client_info = .{
+                                        .name = name,
+                                        .version = version,
+                                        .title = title,
+                                    };
+                                    self.client_info_owned = true;
+                                }
+                            }
                         }
-                        self.client_info_owned = true;
-                        self.client_info = info;
                     }
-                    if (p.capabilities) |caps| {
-                        self.client_capabilities = .{
-                            .roots = if (caps.roots) |r| .{ .list_changed = r.listChanged } else null,
-                            .sampling = if (caps.sampling != null) .{} else null,
-                            .elicitation = if (caps.elicitation != null) .{} else null,
-                        };
+                }
+
+                // Parse capabilities
+                if (obj.get("capabilities")) |caps_val| {
+                    if (caps_val == .object) {
+                        const caps_obj = caps_val.object;
+                        var caps: types.ClientCapabilities = .{};
+                        if (caps_obj.get("roots")) |roots_val| {
+                            if (roots_val == .object) {
+                                const roots_obj = roots_val.object;
+                                caps.roots = .{
+                                    .list_changed = if (roots_obj.get("listChanged")) |lc| switch (lc) {
+                                        .bool => |b| b,
+                                        else => false,
+                                    } else false,
+                                };
+                            }
+                        }
+                        if (caps_obj.get("sampling") != null) {
+                            caps.sampling = .{};
+                        }
+                        if (caps_obj.get("elicitation") != null) {
+                            caps.elicitation = .{};
+                        }
+                        self.client_capabilities = caps;
                     }
                 }
             }
@@ -575,19 +634,26 @@ pub const Server = struct {
             return;
         };
 
-        var arena = std.heap.ArenaAllocator.init(self.getAllocator());
-        defer arena.deinit();
-        const a = arena.allocator();
-
-        const Params = struct {
-            level: []const u8,
+        const obj = switch (params) {
+            .object => |o| o,
+            else => {
+                try self.sendError(jsonrpc.Error.invalidParams(req.id, "params must be an object"));
+                return;
+            },
         };
-        const ParamsMapper = typed_codec.defaultMapper(Params);
-        const parsed = typed_codec.valueToTyped(a, Params, ParamsMapper, params) catch {
-            try self.sendError(jsonrpc.Error.invalidParams(req.id, "params.level must be a string"));
+
+        const level_val = obj.get("level") orelse {
+            try self.sendError(jsonrpc.Error.invalidParams(req.id, "Missing level"));
             return;
         };
-        const level_str = parsed.level;
+
+        const level_str = switch (level_val) {
+            .string => |s| s,
+            else => {
+                try self.sendError(jsonrpc.Error.invalidParams(req.id, "params.level must be a string"));
+                return;
+            },
+        };
 
         const level = std.meta.stringToEnum(types.LoggingLevel, level_str) orelse {
             try self.sendError(jsonrpc.Error.invalidParams(req.id, "Unknown log level"));

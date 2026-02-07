@@ -27,10 +27,6 @@ pub const Implementation = struct {
         .title = .{ .omit_null = true },
         .description = .{ .omit_null = true },
     });
-
-    pub fn jsonStringify(self: Implementation, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub const PromptsCapability = struct {
@@ -39,10 +35,6 @@ pub const PromptsCapability = struct {
     pub const Mapper = izo.Mapper(PromptsCapability, .{
         .list_changed = .{ .alias = "listChanged", .omit_default = true },
     });
-
-    pub fn jsonStringify(self: PromptsCapability, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub const ResourcesCapability = struct {
@@ -53,10 +45,6 @@ pub const ResourcesCapability = struct {
         .subscribe = .{ .omit_default = true },
         .list_changed = .{ .alias = "listChanged", .omit_default = true },
     });
-
-    pub fn jsonStringify(self: ResourcesCapability, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub const ToolsCapability = struct {
@@ -65,10 +53,6 @@ pub const ToolsCapability = struct {
     pub const Mapper = izo.Mapper(ToolsCapability, .{
         .list_changed = .{ .alias = "listChanged", .omit_default = true },
     });
-
-    pub fn jsonStringify(self: ToolsCapability, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub const TasksRequestsCapability = struct {
@@ -85,10 +69,6 @@ pub const TasksRequestsCapability = struct {
     pub const Mapper = izo.Mapper(TasksRequestsCapability, .{
         .tools = .{ .omit_null = true, .nested = ToolCall.Mapper },
     });
-
-    pub fn jsonStringify(self: TasksRequestsCapability, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub const TasksCapability = struct {
@@ -101,10 +81,6 @@ pub const TasksCapability = struct {
         .cancel = .{ .omit_null = true },
         .requests = .{ .omit_null = true, .nested = TasksRequestsCapability.Mapper },
     });
-
-    pub fn jsonStringify(self: TasksCapability, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub const LoggingCapability = struct {};
@@ -129,10 +105,6 @@ pub const ServerCapabilities = struct {
         .completions = .{ .omit_null = true },
         .experimental = .{ .omit_null = true },
     });
-
-    pub fn jsonStringify(self: ServerCapabilities, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub const RootsCapability = struct {
@@ -141,10 +113,6 @@ pub const RootsCapability = struct {
     pub const Mapper = izo.Mapper(RootsCapability, .{
         .list_changed = .{ .alias = "listChanged", .omit_default = true },
     });
-
-    pub fn jsonStringify(self: RootsCapability, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub const SamplingCapability = struct {};
@@ -164,10 +132,6 @@ pub const ClientCapabilities = struct {
         .tasks = .{ .omit_null = true, .nested = TasksCapability.Mapper },
         .experimental = .{ .omit_null = true },
     });
-
-    pub fn jsonStringify(self: ClientCapabilities, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub const InitializeRequestParams = struct {
@@ -187,10 +151,6 @@ pub const InitializeResult = struct {
         .serverInfo = .{ .nested = Implementation.Mapper },
         .instructions = .{ .omit_null = true },
     });
-
-    pub fn jsonStringify(self: InitializeResult, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub const Root = struct {
@@ -200,10 +160,6 @@ pub const Root = struct {
     pub const Mapper = izo.Mapper(Root, .{
         .name = .{ .omit_null = true },
     });
-
-    pub fn jsonStringify(self: Root, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 /// Frees a root's strings (only valid if `uri` and `name` were allocator-owned).
@@ -218,10 +174,6 @@ pub const ListRootsResult = struct {
     pub const Mapper = izo.Mapper(ListRootsResult, .{
         .roots = .{ .element_mapper = Root.Mapper },
     });
-
-    pub fn jsonStringify(self: ListRootsResult, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 /// Handler-safe, allocator-owned roots list result.
@@ -255,10 +207,9 @@ pub const OwnedListRootsResult = struct {
         try self.roots.append(self.allocator, .{ .uri = uri_duped, .name = name_duped });
     }
 
-    pub fn jsonStringify(self: OwnedListRootsResult, jws: *json.Stringify) !void {
-        try ListRootsResult.Mapper.adapter(.{
-            .roots = self.roots.items,
-        }).jsonStringify(jws);
+    /// Returns a ListRootsResult for serialization.
+    pub fn toSerializable(self: OwnedListRootsResult) ListRootsResult {
+        return .{ .roots = self.roots.items };
     }
 };
 
@@ -276,10 +227,6 @@ pub const Tool = struct {
     pub fn deinit(_: Tool, _: std.mem.Allocator) void {
         // schema.JsonSchema is now composed of comptime constants
     }
-
-    pub fn jsonStringify(self: Tool, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub const ListToolsResult = struct {
@@ -290,48 +237,17 @@ pub const ListToolsResult = struct {
         .tools = .{ .element_mapper = Tool.Mapper },
         .nextCursor = .{ .omit_null = true },
     });
-
-    pub fn jsonStringify(self: ListToolsResult, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub fn stringifyJsonAlloc(allocator: std.mem.Allocator, value: anytype) ![]u8 {
     const T = @TypeOf(value);
-    if (comptime shouldUseIzoStringify(T)) {
-        const Mapper = comptime izo.Mapper(T, .{});
-        return @constCast(try izo.json.encode(allocator, value, Mapper, .{}));
+    // For json.Value, use standard library stringify
+    if (T == json.Value) {
+        return try std.json.Stringify.valueAlloc(allocator, value, .{});
     }
-
-    var aw: Io.Writer.Allocating = .init(allocator);
-    errdefer aw.deinit();
-
-    var jws: json.Stringify = .{ .writer = &aw.writer };
-    try stringifyAnyJsonValue(&jws, value);
-
-    try aw.writer.flush();
-    const result = try allocator.dupe(u8, aw.written());
-    aw.deinit();
-    return result;
-}
-
-fn shouldUseIzoStringify(comptime T: type) bool {
-    const info = @typeInfo(T);
-    if (info != .@"struct") return false;
-    return !@hasDecl(T, "jsonStringify");
-}
-
-fn stringifyAnyJsonValue(jws: *json.Stringify, value: anytype) !void {
-    const T = @TypeOf(value);
-    const is_container = switch (@typeInfo(T)) {
-        .@"struct", .@"enum", .@"union", .@"opaque" => true,
-        else => false,
-    };
-    if (is_container and @hasDecl(T, "jsonStringify")) {
-        try value.jsonStringify(jws);
-    } else {
-        try jws.write(value);
-    }
+    // For other types, use izo.json.encode
+    const Mapper = comptime izo.Mapper(T, .{});
+    return @constCast(try izo.json.encode(allocator, value, Mapper, .{}));
 }
 
 pub const TextContent = struct {
@@ -353,24 +269,7 @@ pub const ContentBlock = union(enum) {
     text: TextContent,
     image: ImageContent,
 
-    pub const Mapper = struct {
-        pub const Adapter = struct {
-            value: ContentBlock,
-            pub fn jsonStringify(self: @This(), jws: *json.Stringify) !void {
-                switch (self.value) {
-                    .text => |t| try jws.write(TextContentMapper.adapter(t)),
-                    .image => |i| try jws.write(ImageContentMapper.adapter(i)),
-                }
-            }
-        };
-        pub fn adapter(value: ContentBlock) Adapter {
-            return .{ .value = value };
-        }
-    };
-
-    pub fn jsonStringify(self: ContentBlock, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
+    pub const Mapper = izo.Mapper(ContentBlock, .{});
 };
 
 pub const CallToolResult = struct {
@@ -381,10 +280,6 @@ pub const CallToolResult = struct {
         .content = .{ .element_mapper = ContentBlock.Mapper },
         .isError = .{ .omit_default = true },
     });
-
-    pub fn jsonStringify(self: CallToolResult, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 fn freeContentBlock(allocator: std.mem.Allocator, block: ContentBlock) void {
@@ -430,11 +325,12 @@ pub const OwnedCallToolResult = struct {
         try self.content.append(self.allocator, .{ .image = .{ .data = data_duped, .mimeType = mime_duped } });
     }
 
-    pub fn jsonStringify(self: OwnedCallToolResult, jws: *json.Stringify) !void {
-        try CallToolResult.Mapper.adapter(.{
+    /// Returns a CallToolResult for serialization.
+    pub fn toSerializable(self: OwnedCallToolResult) CallToolResult {
+        return .{
             .content = self.content.items,
             .isError = self.isError,
-        }).jsonStringify(jws);
+        };
     }
 };
 
@@ -448,10 +344,6 @@ pub const Resource = struct {
         .description = .{ .omit_null = true },
         .mimeType = .{ .omit_null = true },
     });
-
-    pub fn jsonStringify(self: Resource, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub const ListResourcesResult = struct {
@@ -462,10 +354,6 @@ pub const ListResourcesResult = struct {
         .resources = .{ .element_mapper = Resource.Mapper },
         .nextCursor = .{ .omit_null = true },
     });
-
-    pub fn jsonStringify(self: ListResourcesResult, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub const TextResourceContents = struct {
@@ -476,10 +364,6 @@ pub const TextResourceContents = struct {
     pub const Mapper = izo.Mapper(TextResourceContents, .{
         .mimeType = .{ .omit_null = true },
     });
-
-    pub fn jsonStringify(self: TextResourceContents, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub const BlobResourceContents = struct {
@@ -490,34 +374,13 @@ pub const BlobResourceContents = struct {
     pub const Mapper = izo.Mapper(BlobResourceContents, .{
         .mimeType = .{ .omit_null = true },
     });
-
-    pub fn jsonStringify(self: BlobResourceContents, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub const ResourceContents = union(enum) {
     text: TextResourceContents,
     blob: BlobResourceContents,
 
-    pub const Mapper = struct {
-        pub const Adapter = struct {
-            value: ResourceContents,
-            pub fn jsonStringify(self: @This(), jws: *json.Stringify) !void {
-                switch (self.value) {
-                    .text => |t| try TextResourceContents.Mapper.adapter(t).jsonStringify(jws),
-                    .blob => |b| try BlobResourceContents.Mapper.adapter(b).jsonStringify(jws),
-                }
-            }
-        };
-        pub fn adapter(value: ResourceContents) Adapter {
-            return .{ .value = value };
-        }
-    };
-
-    pub fn jsonStringify(self: ResourceContents, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
+    pub const Mapper = izo.Mapper(ResourceContents, .{});
 };
 
 pub const ReadResourceResult = struct {
@@ -526,10 +389,6 @@ pub const ReadResourceResult = struct {
     pub const Mapper = izo.Mapper(ReadResourceResult, .{
         .contents = .{ .element_mapper = ResourceContents.Mapper },
     });
-
-    pub fn jsonStringify(self: ReadResourceResult, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 fn freeResourceContents(allocator: std.mem.Allocator, c: ResourceContents) void {
@@ -598,10 +457,9 @@ pub const OwnedReadResourceResult = struct {
         });
     }
 
-    pub fn jsonStringify(self: OwnedReadResourceResult, jws: *json.Stringify) !void {
-        try ReadResourceResult.Mapper.adapter(.{
-            .contents = self.contents.items,
-        }).jsonStringify(jws);
+    /// Returns a ReadResourceResult for serialization.
+    pub fn toSerializable(self: OwnedReadResourceResult) ReadResourceResult {
+        return .{ .contents = self.contents.items };
     }
 };
 
@@ -614,10 +472,6 @@ pub const PromptArgument = struct {
         .description = .{ .omit_null = true },
         .required = .{ .omit_default = true },
     });
-
-    pub fn jsonStringify(self: PromptArgument, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub const Prompt = struct {
@@ -629,10 +483,6 @@ pub const Prompt = struct {
         .description = .{ .omit_null = true },
         .arguments = .{ .omit_null = true, .element_mapper = PromptArgument.Mapper },
     });
-
-    pub fn jsonStringify(self: Prompt, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub const ListPromptsResult = struct {
@@ -643,10 +493,6 @@ pub const ListPromptsResult = struct {
         .prompts = .{ .element_mapper = Prompt.Mapper },
         .nextCursor = .{ .omit_null = true },
     });
-
-    pub fn jsonStringify(self: ListPromptsResult, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub const PromptMessage = struct {
@@ -654,10 +500,6 @@ pub const PromptMessage = struct {
     content: ContentBlock,
 
     pub const Mapper = izo.Mapper(PromptMessage, .{});
-
-    pub fn jsonStringify(self: PromptMessage, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub const GetPromptResult = struct {
@@ -668,10 +510,6 @@ pub const GetPromptResult = struct {
         .description = .{ .omit_null = true },
         .messages = .{ .element_mapper = PromptMessage.Mapper },
     });
-
-    pub fn jsonStringify(self: GetPromptResult, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 fn freePromptMessage(allocator: std.mem.Allocator, msg: PromptMessage) void {
@@ -722,11 +560,12 @@ pub const OwnedGetPromptResult = struct {
         });
     }
 
-    pub fn jsonStringify(self: OwnedGetPromptResult, jws: *json.Stringify) !void {
-        try GetPromptResult.Mapper.adapter(.{
+    /// Returns a GetPromptResult for serialization.
+    pub fn toSerializable(self: OwnedGetPromptResult) GetPromptResult {
+        return .{
             .description = self.description,
             .messages = self.messages.items,
-        }).jsonStringify(jws);
+        };
     }
 };
 
@@ -749,10 +588,6 @@ pub const LoggingSetLevelParams = struct {
     level: LoggingLevel,
 
     pub const Mapper = izo.Mapper(LoggingSetLevelParams, .{});
-
-    pub fn jsonStringify(self: LoggingSetLevelParams, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub const EmptyResult = struct {};
@@ -767,10 +602,6 @@ pub const LoggingMessageParams = struct {
     pub const Mapper = izo.Mapper(LoggingMessageParams, .{
         .logger = .{ .omit_null = true },
     });
-
-    pub fn jsonStringify(self: LoggingMessageParams, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub const ProgressToken = union(enum) {
@@ -787,25 +618,6 @@ pub const ProgressToken = union(enum) {
             else => return error.UnexpectedToken,
         }
     }
-
-    pub const Mapper = struct {
-        pub const Adapter = struct {
-            value: ProgressToken,
-            pub fn jsonStringify(self: @This(), jws: *json.Stringify) !void {
-                switch (self.value) {
-                    .string => |s| try jws.write(s),
-                    .number => |n| try jws.write(n),
-                }
-            }
-        };
-        pub fn adapter(value: ProgressToken) Adapter {
-            return .{ .value = value };
-        }
-    };
-
-    pub fn jsonStringify(self: ProgressToken, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub const ProgressParams = struct {
@@ -818,10 +630,6 @@ pub const ProgressParams = struct {
         .total = .{ .omit_null = true },
         .message = .{ .omit_null = true },
     });
-
-    pub fn jsonStringify(self: ProgressParams, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub const TaskStatus = enum {
@@ -859,10 +667,6 @@ pub const Task = struct {
         .statusMessage = .{ .omit_null = true },
         .pollInterval = .{ .omit_null = true },
     });
-
-    pub fn jsonStringify(self: Task, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub const CreateTaskResult = struct {
@@ -871,10 +675,6 @@ pub const CreateTaskResult = struct {
     pub const Mapper = izo.Mapper(CreateTaskResult, .{
         .task = .{ .nested = Task.Mapper },
     });
-
-    pub fn jsonStringify(self: CreateTaskResult, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 pub const ListTasksResult = struct {
@@ -885,10 +685,6 @@ pub const ListTasksResult = struct {
         .tasks = .{ .element_mapper = Task.Mapper },
         .nextCursor = .{ .omit_null = true },
     });
-
-    pub fn jsonStringify(self: ListTasksResult, jws: *json.Stringify) !void {
-        try Mapper.adapter(self).jsonStringify(jws);
-    }
 };
 
 test "ServerCapabilities stringify" {
@@ -897,14 +693,9 @@ test "ServerCapabilities stringify" {
         .resources = ResourcesCapability{ .subscribe = true },
     };
 
-    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer aw.deinit();
-
-    var jws: json.Stringify = .{ .writer = &aw.writer };
-    try caps.jsonStringify(&jws);
-
-    try aw.writer.flush();
-    try std.testing.expect(aw.written().len > 0);
+    const json_str = try izo.json.encode(std.testing.allocator, caps, ServerCapabilities.Mapper, .{});
+    defer std.testing.allocator.free(json_str);
+    try std.testing.expect(json_str.len > 0);
 }
 
 test "TasksCapability stringify uses nested objects" {
@@ -916,20 +707,15 @@ test "TasksCapability stringify uses nested objects" {
         },
     };
 
-    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer aw.deinit();
+    const json_str = try izo.json.encode(std.testing.allocator, caps, ServerCapabilities.Mapper, .{});
+    defer std.testing.allocator.free(json_str);
 
-    var jws: json.Stringify = .{ .writer = &aw.writer };
-    try caps.jsonStringify(&jws);
-    try aw.writer.flush();
-
-    const out = aw.written();
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"tasks\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"requests\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"list\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"cancel\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"tools\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"call\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"tasks\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"requests\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"list\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"cancel\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"tools\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"call\"") != null);
 }
 
 test "Task stringify uses taskId/lastUpdatedAt and includes ttl" {
@@ -942,18 +728,14 @@ test "Task stringify uses taskId/lastUpdatedAt and includes ttl" {
         .pollInterval = 500,
     };
 
-    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer aw.deinit();
-    var jws: json.Stringify = .{ .writer = &aw.writer };
-    try task.jsonStringify(&jws);
-    try aw.writer.flush();
+    const json_str = try izo.json.encode(std.testing.allocator, task, Task.Mapper, .{});
+    defer std.testing.allocator.free(json_str);
 
-    const out = aw.written();
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"taskId\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"lastUpdatedAt\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"ttl\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"pollInterval\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"working\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"taskId\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"lastUpdatedAt\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"ttl\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"pollInterval\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"working\"") != null);
 }
 
 test "Task stringify omits pollInterval when null" {
@@ -966,12 +748,8 @@ test "Task stringify omits pollInterval when null" {
         .pollInterval = null,
     };
 
-    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer aw.deinit();
-    var jws: json.Stringify = .{ .writer = &aw.writer };
-    try task.jsonStringify(&jws);
-    try aw.writer.flush();
+    const json_str = try izo.json.encode(std.testing.allocator, task, Task.Mapper, .{});
+    defer std.testing.allocator.free(json_str);
 
-    const out = aw.written();
-    try std.testing.expect(std.mem.indexOf(u8, out, "\"pollInterval\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"pollInterval\"") == null);
 }

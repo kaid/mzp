@@ -139,7 +139,7 @@ pub const Capability = struct {
         };
         defer result.deinit();
 
-        try server.sendResult(req.id, result);
+        try server.sendResult(req.id, result.toSerializable());
     }
 
     pub fn handleNotification(self: *Capability, server: anytype, notif: jsonrpc.Notification) !void {

@@ -164,7 +164,7 @@ pub const Capability = struct {
         };
         defer result.deinit();
 
-        const payload_json = types.stringifyJsonAlloc(a, result) catch {
+        const payload_json = types.stringifyJsonAlloc(a, result.toSerializable()) catch {
             self.finalizeTaskCancelled(job.task) catch {};
             self.notifyStatus(self.snapshotTask(job.task));
             return;
@@ -385,7 +385,7 @@ pub const Capability = struct {
         };
         var arena = std.heap.ArenaAllocator.init(self.taskAllocator());
         defer arena.deinit();
-        const id = getTaskIdParamValue(arena.allocator(), params) orelse {
+        const id = getTaskIdParamValue(params) orelse {
             try server.sendError(jsonrpc.Error.invalidParams(req.id, "Missing task id"));
             return;
         };
@@ -413,9 +413,7 @@ pub const Capability = struct {
             try server.sendError(jsonrpc.Error.invalidParams(req.id, "Missing params"));
             return;
         };
-        var arena = std.heap.ArenaAllocator.init(self.taskAllocator());
-        defer arena.deinit();
-        const id = getTaskIdParamValue(arena.allocator(), params) orelse {
+        const id = getTaskIdParamValue(params) orelse {
             try server.sendError(jsonrpc.Error.invalidParams(req.id, "Missing task id"));
             return;
         };
@@ -438,7 +436,7 @@ pub const Capability = struct {
                 defer cancel_result.deinit();
                 cancel_result.isError = true;
                 try cancel_result.addText("Cancelled");
-                rec.payload_json = try types.stringifyJsonAlloc(a, cancel_result);
+                rec.payload_json = try types.stringifyJsonAlloc(a, cancel_result.toSerializable());
             }
         }
         const task_copy = rec.task;
@@ -461,9 +459,7 @@ pub const Capability = struct {
             try server.sendError(jsonrpc.Error.invalidParams(req.id, "Missing params"));
             return;
         };
-        var params_arena = std.heap.ArenaAllocator.init(self.taskAllocator());
-        defer params_arena.deinit();
-        const id = getTaskIdParamValue(params_arena.allocator(), params) orelse {
+        const id = getTaskIdParamValue(params) orelse {
             try server.sendError(jsonrpc.Error.invalidParams(req.id, "Missing task id"));
             return;
         };
@@ -562,7 +558,7 @@ pub const Capability = struct {
             defer cancel_result.deinit();
             cancel_result.isError = true;
             try cancel_result.addText("Cancelled");
-            rec.payload_json = try types.stringifyJsonAlloc(a, cancel_result);
+            rec.payload_json = try types.stringifyJsonAlloc(a, cancel_result.toSerializable());
         }
 
         self.tasks_mutex.unlock();
@@ -604,15 +600,20 @@ pub fn parseTaskMetadataValue(task_val: ?json.Value) !?Capability.TaskParams {
     };
 }
 
-fn getTaskIdParamValue(allocator: std.mem.Allocator, params: json.Value) ?[]const u8 {
-    const Params = struct {
-        id: ?[]const u8 = null,
-        taskId: ?[]const u8 = null,
+fn getTaskIdParamValue(params: json.Value) ?[]const u8 {
+    const obj = switch (params) {
+        .object => |o| o,
+        else => return null,
     };
-    const ParamsMapper = typed_codec.defaultMapper(Params);
-    const parsed = typed_codec.valueToTyped(allocator, Params, ParamsMapper, params) catch return null;
-    if (parsed.id) |id| return id;
-    return parsed.taskId;
+
+    // Try "id" first, then "taskId"
+    if (obj.get("id")) |id_val| {
+        if (id_val == .string) return id_val.string;
+    }
+    if (obj.get("taskId")) |tid_val| {
+        if (tid_val == .string) return tid_val.string;
+    }
+    return null;
 }
 
 fn allocIsoTimestamp(allocator: std.mem.Allocator) ![]u8 {
