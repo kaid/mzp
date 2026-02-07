@@ -184,7 +184,7 @@ pub const Client = struct {
     }
 
     pub fn initialize(self: *Client) !types.InitializeResult {
-        const params = .{
+        const params = types.InitializeRequestParams{
             .protocolVersion = types.LATEST_PROTOCOL_VERSION,
             .capabilities = self.options.capabilities,
             .clientInfo = types.Implementation{
@@ -742,8 +742,85 @@ test "Client initialize parses server result" {
 }
 
 test "Client initialize sends roots capability with listChanged" {
-    // FIXME: This test hangs - likely a concurrency deadlock
-    return error.SkipZigTest;
+    var tio: TestIo = undefined;
+    tio.init(std.testing.allocator);
+    defer tio.deinit();
+    const io = tio.io;
+
+    var duplex: transport_mod.DuplexTransport = undefined;
+    duplex.init(std.testing.allocator);
+    defer duplex.deinit(io);
+
+    var client = Client.init(
+        std.testing.allocator,
+        .{
+            .name = "test-client",
+            .version = "1.0.0",
+            .capabilities = .{ .roots = .{ .list_changed = true } },
+        },
+        duplex.endpointA().asTransport(),
+    );
+    defer client.deinit();
+    client.io = io;
+
+    const FakeServer = struct {
+        fn run(ep: *transport_mod.DuplexTransport.Endpoint, io2: std.Io) !void {
+            defer ep.asTransport().close(io2);
+            const msg = (try ep.asTransport().read(io2, std.testing.allocator)) orelse return;
+            defer jsonrpc.Message.freeMessage(std.testing.allocator, msg);
+
+            const req = switch (msg) {
+                .request => |r| r,
+                else => return error.UnexpectedToken,
+            };
+            try std.testing.expectEqualStrings("initialize", req.method);
+            const id_num = switch (req.id) {
+                .number => |n| n,
+                .string => return error.UnexpectedToken,
+            };
+
+            // Validate roots.listChanged in params.capabilities.
+            const params = req.params orelse return error.UnexpectedToken;
+            const obj = switch (params) {
+                .object => |o| o,
+                else => return error.UnexpectedToken,
+            };
+            const caps_val = obj.get("capabilities") orelse return error.UnexpectedToken;
+            const caps_obj = switch (caps_val) {
+                .object => |o| o,
+                else => return error.UnexpectedToken,
+            };
+            const roots_val = caps_obj.get("roots") orelse return error.UnexpectedToken;
+            const roots_obj = switch (roots_val) {
+                .object => |o| o,
+                else => return error.UnexpectedToken,
+            };
+            const lc = roots_obj.get("listChanged") orelse return error.UnexpectedToken;
+            try std.testing.expect(lc == .bool and lc.bool);
+
+            const response = try std.fmt.allocPrint(
+                std.testing.allocator,
+                "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{{}},\"serverInfo\":{{\"name\":\"srv\",\"version\":\"1.2.3\"}}}}}}",
+                .{id_num},
+            );
+            defer std.testing.allocator.free(response);
+            try ep.asTransport().write(io2, response);
+
+            // Read notifications/initialized.
+            const initialized_msg = (try ep.asTransport().read(io2, std.testing.allocator)) orelse return;
+            defer jsonrpc.Message.freeMessage(std.testing.allocator, initialized_msg);
+        }
+    };
+
+    var run_future = try std.Io.concurrent(io, Client.run, .{ &client, io });
+    defer _ = run_future.cancel(io) catch {};
+    var srv_future = try std.Io.concurrent(io, FakeServer.run, .{ duplex.endpointB(), io });
+    defer _ = srv_future.cancel(io) catch {};
+
+    _ = try client.initialize();
+
+    try srv_future.await(io);
+    try run_future.await(io);
 }
 
 test "Client responds to roots/list while waiting for response" {

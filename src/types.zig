@@ -138,6 +138,11 @@ pub const InitializeRequestParams = struct {
     protocolVersion: []const u8,
     capabilities: ClientCapabilities,
     clientInfo: Implementation,
+
+    pub const Mapper = izo.Mapper(InitializeRequestParams, .{
+        .capabilities = .{ .nested = ClientCapabilities.Mapper },
+        .clientInfo = .{ .nested = Implementation.Mapper },
+    });
 };
 
 pub const InitializeResult = struct {
