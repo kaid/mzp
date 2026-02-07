@@ -31,7 +31,7 @@ pub fn handleCancelledNotification(self: anytype, notif: jsonrpc.Notification) v
         requestId: jsonrpc.RequestId,
     };
     const ParamsMapper = typed_codec.defaultMapper(Params);
-    const parsed = typed_codec.valueToTyped(a, Params, ParamsMapper, params) catch return;
+    const parsed = typed_codec.valueToTyped(a, ParamsMapper, params) catch return;
     const rid = parsed.requestId;
 
     self.active_requests_mutex.lock();

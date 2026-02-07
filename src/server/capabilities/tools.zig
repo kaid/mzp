@@ -73,7 +73,7 @@ pub const Capability = struct {
                 const aa = arena.allocator();
 
                 const typed_args: ?Args = if (arguments) |raw_args|
-                    try typed_codec.valueToTyped(aa, Args, ArgsMapper, raw_args)
+                    try typed_codec.valueToTyped(aa, ArgsMapper, raw_args)
                 else
                     null;
                 return try handler(bridge_user_data, name, typed_args, meta, cancel, allocator);
@@ -249,7 +249,7 @@ pub const Capability = struct {
         };
         const WireMetaMapper = typed_codec.defaultMapper(WireMeta);
 
-        const parsed = typed_codec.valueToTyped(allocator, WireMeta, WireMetaMapper, mv) catch return .{};
+        const parsed = typed_codec.valueToTyped(allocator, WireMetaMapper, mv) catch return .{};
         return .{
             .progressToken = parsed.progressToken,
         };

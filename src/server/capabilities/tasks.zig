@@ -320,7 +320,7 @@ pub const Capability = struct {
                     cursor: ?[]const u8 = null,
                 };
                 const ParamsMapper = typed_codec.defaultMapper(Params);
-                const parsed = typed_codec.valueToTyped(a, Params, ParamsMapper, p) catch {
+                const parsed = typed_codec.valueToTyped(a, ParamsMapper, p) catch {
                     try server.sendError(jsonrpc.Error.invalidParams(req.id, "Params must be object"));
                     return;
                 };
@@ -590,7 +590,7 @@ pub fn parseTaskMetadataValue(task_val: ?json.Value) !?Capability.TaskParams {
     };
     const WireTaskMetadataMapper = typed_codec.defaultMapper(WireTaskMetadata);
 
-    const decoded = typed_codec.valueToTyped(a, WireTaskMetadata, WireTaskMetadataMapper, tv) catch {
+    const decoded = typed_codec.valueToTyped(a, WireTaskMetadataMapper, tv) catch {
         return error.InvalidTaskMetadata;
     };
 

@@ -25,17 +25,11 @@ pub fn encodeTypedDefault(
 
 pub fn decodeTyped(
     allocator: std.mem.Allocator,
-    comptime T: type,
     comptime Mapper: type,
     input: []const u8,
-) !T {
-    _ = Mapper;
-    // Use std.json.parseFromSliceLeaky which returns T directly without Parsed wrapper
-    // Strings will be allocated using the provided allocator and remain valid
-    return try std.json.parseFromSliceLeaky(T, allocator, input, .{
-        .ignore_unknown_fields = true,
-        .duplicate_field_behavior = .use_last,
-    });
+) !Mapper.TargetType {
+    // Use izomorph decode which respects Mapper configuration (aliases, etc.)
+    return try izo.json.decode(allocator, Mapper, input);
 }
 
 pub fn decodeTypedDefault(
@@ -43,18 +37,17 @@ pub fn decodeTypedDefault(
     comptime T: type,
     input: []const u8,
 ) !T {
-    return try decodeTyped(allocator, T, defaultMapper(T), input);
+    return try decodeTyped(allocator, defaultMapper(T), input);
 }
 
 pub fn valueToTyped(
     allocator: std.mem.Allocator,
-    comptime T: type,
     comptime Mapper: type,
     value: json.Value,
-) !T {
+) !Mapper.TargetType {
     const json_text = try types.stringifyJsonAlloc(allocator, value);
     defer allocator.free(json_text);
-    return try decodeTyped(allocator, T, Mapper, json_text);
+    return try decodeTyped(allocator, Mapper, json_text);
 }
 
 pub fn valueToTypedDefault(
@@ -62,7 +55,7 @@ pub fn valueToTypedDefault(
     comptime T: type,
     value: json.Value,
 ) !T {
-    return try valueToTyped(allocator, T, defaultMapper(T), value);
+    return try valueToTyped(allocator, defaultMapper(T), value);
 }
 
 pub fn typedToValue(

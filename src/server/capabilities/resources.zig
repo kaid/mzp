@@ -78,7 +78,7 @@ pub const Capability = struct {
         };
         const ParamsMapper = typed_codec.defaultMapper(Params);
 
-        const parsed = typed_codec.valueToTyped(a, Params, ParamsMapper, params) catch {
+        const parsed = typed_codec.valueToTyped(a, ParamsMapper, params) catch {
             try server.sendError(jsonrpc.Error.invalidParams(req.id, "Params must contain string uri"));
             return;
         };
