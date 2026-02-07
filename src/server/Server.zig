@@ -1,5 +1,6 @@
 const std = @import("std");
 const json = std.json;
+const izo = @import("izomorph");
 const jsonrpc = @import("../jsonrpc.zig");
 const types = @import("../types.zig");
 const transport_mod = @import("../transport.zig");
@@ -520,19 +521,14 @@ pub const Server = struct {
         return try typed_codec.valueToTyped(allocator, Resp, RespMapper, result_value);
     }
 
+    const CancelParams = struct {
+        requestId: jsonrpc.RequestId,
+        pub const Mapper = izo.Mapper(CancelParams, .{});
+    };
+
     fn sendCancelledNotification(self: *Server, id: jsonrpc.RequestId) void {
         const io = self.io orelse return;
         const a = self.getAllocator();
-        const CancelParams = struct {
-            requestId: jsonrpc.RequestId,
-
-            pub fn jsonStringify(self_: @This(), jws: *json.Stringify) !void {
-                try jws.beginObject();
-                try jws.objectField("requestId");
-                try self_.requestId.jsonStringify(jws);
-                try jws.endObject();
-            }
-        };
         const payload = envelope_codec.encodeNotificationAlloc(a, "notifications/cancelled", CancelParams{ .requestId = id }) catch return;
         defer a.free(payload);
 

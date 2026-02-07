@@ -19,7 +19,7 @@ pub fn encodeRequestAlloc(
     try jws.objectField("jsonrpc");
     try jws.write("2.0");
     try jws.objectField("id");
-    try id.jsonStringify(&jws);
+    try writeRequestValue(allocator, &jws, id);
     try jws.objectField("method");
     try jws.write(method);
     if (@TypeOf(params) != @TypeOf(null)) {
@@ -73,7 +73,7 @@ pub fn encodeResponseAlloc(
     try jws.objectField("jsonrpc");
     try jws.write("2.0");
     try jws.objectField("id");
-    try id.jsonStringify(&jws);
+    try writeRequestValue(allocator, &jws, id);
     try jws.objectField("result");
     try writeRequestValue(allocator, &jws, result);
     try jws.endObject();
@@ -92,7 +92,12 @@ pub fn encodeErrorAlloc(
     errdefer aw.deinit();
 
     var jws: json.Stringify = .{ .writer = &aw.writer };
-    try err.jsonStringify(&jws);
+    try jws.beginObject();
+    try jws.objectField("jsonrpc");
+    try jws.write("2.0");
+    try jws.objectField("error");
+    try writeRequestValue(allocator, &jws, err);
+    try jws.endObject();
 
     try aw.writer.flush();
     const out = try allocator.dupe(u8, aw.written());

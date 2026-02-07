@@ -1,11 +1,14 @@
 const std = @import("std");
 const json = std.json;
+const izo = @import("izomorph");
 
 pub const JSONRPC_VERSION = "2.0";
 
 pub const RequestId = union(enum) {
     string: []const u8,
     number: i64,
+
+    pub const Mapper = izo.Mapper(RequestId, .{ .union_strategy = .bare });
 
     pub fn jsonStringify(self: RequestId, jws: *json.Stringify) !void {
         switch (self) {

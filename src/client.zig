@@ -273,19 +273,14 @@ pub const Client = struct {
         return timeout orelse self.options.default_timeout;
     }
 
+    const CancelParams = struct {
+        requestId: jsonrpc.RequestId,
+        pub const Mapper = izo.Mapper(CancelParams, .{});
+    };
+
     fn sendCancelledNotification(self: *Client, id: jsonrpc.RequestId) void {
         const io = self.io orelse return;
         const a = self.getAllocator();
-        const CancelParams = struct {
-            requestId: jsonrpc.RequestId,
-
-            pub fn jsonStringify(self_: @This(), jws: *json.Stringify) !void {
-                try jws.beginObject();
-                try jws.objectField("requestId");
-                try self_.requestId.jsonStringify(jws);
-                try jws.endObject();
-            }
-        };
         const payload = envelope_codec.encodeNotificationAlloc(a, "notifications/cancelled", CancelParams{ .requestId = id }) catch return;
         defer a.free(payload);
 

@@ -1,5 +1,6 @@
 const std = @import("std");
 const json = std.json;
+const izo = @import("izomorph");
 const jsonrpc = @import("../../jsonrpc.zig");
 const types = @import("../../types.zig");
 const common = @import("../common.zig");
@@ -34,6 +35,21 @@ pub const Capability = struct {
     shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     status_notifier: ?StatusNotifier = null,
+
+    const JsonValueWrapper = struct {
+        value: json.Value,
+
+        const ValueAdapter = struct {
+            pub fn encode(allocator: std.mem.Allocator, val: json.Value) !json.Value {
+                _ = allocator;
+                return val;
+            }
+        };
+
+        pub const Mapper = izo.Mapper(JsonValueWrapper, .{
+            .value = .{ .adapter = ValueAdapter },
+        });
+    };
 
     pub const TaskRecord = struct {
         task: types.Task,
@@ -513,14 +529,7 @@ pub const Capability = struct {
             value = .{ .object = obj_map };
         }
 
-        const Wrapper = struct {
-            value: json.Value,
-            pub fn jsonStringify(self_: @This(), jws: *json.Stringify) !void {
-                try jws.write(self_.value);
-            }
-        };
-
-        try server.sendResult(req.id, Wrapper{ .value = value });
+        try server.sendResult(req.id, JsonValueWrapper{ .value = value });
     }
 
     pub fn finalizeTaskWithPayload(

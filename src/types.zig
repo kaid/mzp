@@ -12,9 +12,7 @@ pub const Role = enum {
     user,
     assistant,
 
-    pub fn jsonStringify(self: Role, jws: *json.Stringify) !void {
-        try jws.write(@tagName(self));
-    }
+    pub const Mapper = izo.Mapper(Role, .{});
 };
 
 pub const Implementation = struct {
@@ -584,9 +582,7 @@ pub const LoggingLevel = enum {
     alert,
     emergency,
 
-    pub fn jsonStringify(self: LoggingLevel, jws: *json.Stringify) !void {
-        try jws.write(@tagName(self));
-    }
+    pub const Mapper = izo.Mapper(LoggingLevel, .{});
 };
 
 pub const LoggingSetLevelParams = struct {
