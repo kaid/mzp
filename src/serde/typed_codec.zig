@@ -40,38 +40,48 @@ pub fn decodeTypedDefault(
     return try decodeTyped(allocator, defaultMapper(T), input);
 }
 
+/// Decodes a json.Value into a typed structure using a Mapper.
+/// REQUIRES: `arena` must be an Arena allocator. The returned structure may contain
+/// slices pointing into memory allocated by this function. All allocated memory will
+/// be freed when the arena is deinitialized.
 pub fn valueToTyped(
-    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
     comptime Mapper: type,
     value: json.Value,
 ) !Mapper.TargetType {
-    const json_text = try types.stringifyJsonAlloc(allocator, value);
-    defer allocator.free(json_text);
-    return try decodeTyped(allocator, Mapper, json_text);
+    const json_text = try types.stringifyJsonAlloc(arena, value);
+    // Note: We do NOT free json_text here because the resulting Mapper.TargetType
+    // may contain slices that point into it. The arena will free all memory at once.
+    return try decodeTyped(arena, Mapper, json_text);
 }
 
 pub fn valueToTypedDefault(
-    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
     comptime T: type,
     value: json.Value,
 ) !T {
-    return try valueToTyped(allocator, defaultMapper(T), value);
+    return try valueToTyped(arena, defaultMapper(T), value);
 }
 
+/// Converts a typed structure into a json.Value using a Mapper.
+/// REQUIRES: `arena` must be an Arena allocator. The returned json.Value may contain
+/// slices pointing into memory allocated by this function. All allocated memory will
+/// be freed when the arena is deinitialized.
 pub fn typedToValue(
-    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
     value: anytype,
     comptime Mapper: type,
 ) !json.Value {
-    const json_text = try encodeTyped(allocator, value, Mapper);
-    defer allocator.free(json_text);
-    return try json.parseFromSliceLeaky(json.Value, allocator, json_text, .{});
+    const json_text = try encodeTyped(arena, value, Mapper);
+    // Note: We do NOT free json_text here because the resulting json.Value
+    // may contain slices that point into it. The arena will free all memory at once.
+    return try json.parseFromSliceLeaky(json.Value, arena, json_text, .{});
 }
 
 pub fn typedToValueDefault(
-    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
     value: anytype,
 ) !json.Value {
     const T = @TypeOf(value);
-    return try typedToValue(allocator, value, defaultMapper(T));
+    return try typedToValue(arena, value, defaultMapper(T));
 }

@@ -225,8 +225,12 @@ pub const Client = struct {
         return self.sendRequestWithIdTimeout(id, method, params, timeout);
     }
 
+    /// Sends a typed JSON-RPC request to the server.
+    /// REQUIRES: The caller must pass an arena allocator. The returned Resp may contain
+    /// slices that point into arena-allocated memory and will be freed when the arena is deinitialized.
     pub fn requestTyped(
         self: *Client,
+        arena: std.mem.Allocator,
         comptime Resp: type,
         comptime RespMapper: type,
         method: []const u8,
@@ -235,21 +239,23 @@ pub const Client = struct {
     ) !Resp {
         const result_value = try self.requestRaw(method, params, timeout);
         defer jsonrpc.Message.freeValue(self.getAllocator(), result_value);
-        return try typed_codec.valueToTyped(self.allocator, Resp, RespMapper, result_value);
+        return try typed_codec.valueToTyped(arena, Resp, RespMapper, result_value);
     }
 
     pub fn requestTypedDefault(
         self: *Client,
+        arena: std.mem.Allocator,
         comptime Resp: type,
         method: []const u8,
         params: anytype,
         timeout: ?Io.Clock.Duration,
     ) !Resp {
-        return try self.requestTyped(Resp, typed_codec.defaultMapper(Resp), method, params, timeout);
+        return try self.requestTyped(arena, Resp, typed_codec.defaultMapper(Resp), method, params, timeout);
     }
 
     pub fn callToolTyped(
         self: *Client,
+        arena: std.mem.Allocator,
         comptime Args: type,
         comptime Resp: type,
         comptime ArgsMapper: type,
@@ -266,7 +272,7 @@ pub const Client = struct {
             .arguments = arguments,
         };
         _ = ArgsMapper; // currently kept for parity with typed tool registration APIs.
-        return try self.requestTyped(Resp, RespMapper, "tools/call", params, timeout);
+        return try self.requestTyped(arena, Resp, RespMapper, "tools/call", params, timeout);
     }
 
     fn effectiveTimeout(self: *Client, timeout: ?Io.Clock.Duration) ?Io.Clock.Duration {
@@ -438,7 +444,7 @@ pub const Client = struct {
     fn sendError(self: *Client, err: jsonrpc.Error) !void {
         const io = self.io orelse return error.IoNotSet;
         const a = self.getAllocator();
-        const payload = try envelope_codec.encodeErrorAlloc(a, err);
+        const payload = try envelope_codec.encodeErrorAlloc(a, err.id, err.@"error");
         defer a.free(payload);
         self.io_mutex.lockUncancelable(io);
         defer self.io_mutex.unlock(io);
