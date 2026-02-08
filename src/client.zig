@@ -34,7 +34,8 @@ pub const Client = struct {
     server_instructions_owned: bool = false,
     roots: std.ArrayList(types.Root) = .empty,
 
-    ts_allocator: std.heap.ThreadSafeAllocator,
+    ts_allocator: std.heap.ThreadSafeAllocator = undefined,
+    ts_allocator_inited: bool = false,
     io: ?std.Io = null,
     io_mutex: std.Io.Mutex = .init,
 
@@ -44,7 +45,7 @@ pub const Client = struct {
 
     pending: pending_mod.PendingRegistry = undefined,
     pending_inited: bool = false,
-    run_error_mutex: std.Thread.Mutex = .{},
+    run_error_mutex: std.Io.Mutex = .init,
     run_error: ?anyerror = null,
 
     pub fn init(allocator: std.mem.Allocator, options: ClientOptions, transport: *Transport) Client {
@@ -52,7 +53,6 @@ pub const Client = struct {
             .allocator = allocator,
             .options = options,
             .transport = transport,
-            .ts_allocator = .{ .child_allocator = allocator },
         };
     }
 
@@ -66,18 +66,26 @@ pub const Client = struct {
     }
 
     fn getAllocator(self: *Client) std.mem.Allocator {
+        if (!self.ts_allocator_inited) {
+            // Return the raw allocator if ThreadSafeAllocator is not initialized yet
+            return self.allocator;
+        }
         return (&self.ts_allocator).allocator();
     }
 
     pub fn run(self: *Client, io: std.Io) anyerror!void {
         self.io = io;
+        if (!self.ts_allocator_inited) {
+            self.ts_allocator = .{ .child_allocator = self.allocator, .io = io };
+            self.ts_allocator_inited = true;
+        }
         if (!self.pending_inited) {
             self.pending = pending_mod.PendingRegistry.init(self.getAllocator());
             self.pending_inited = true;
         }
-        self.run_error_mutex.lock();
+        self.run_error_mutex.lockUncancelable(io);
         self.run_error = null;
-        self.run_error_mutex.unlock();
+        self.run_error_mutex.unlock(io);
 
         self.inbound_queue = std.Io.Queue(*jsonrpc.Message).init(self.inbound_buf[0..]);
         self.run_group = .init;
@@ -87,15 +95,16 @@ pub const Client = struct {
 
         try self.run_group.await(io);
 
-        self.run_error_mutex.lock();
+        self.run_error_mutex.lockUncancelable(io);
         const err = self.run_error;
-        self.run_error_mutex.unlock();
+        self.run_error_mutex.unlock(io);
         if (err) |e| return e;
     }
 
     fn setRunError(self: *Client, err: anyerror) void {
-        self.run_error_mutex.lock();
-        defer self.run_error_mutex.unlock();
+        const io = self.io orelse return;
+        self.run_error_mutex.lockUncancelable(io);
+        defer self.run_error_mutex.unlock(io);
         if (self.run_error == null) self.run_error = err;
     }
 
@@ -299,7 +308,7 @@ pub const Client = struct {
         return sp.pending.wait(io);
     }
 
-    fn sleepDuration(d: Io.Clock.Duration, io: Io) Io.SleepError!void {
+    fn sleepDuration(d: Io.Clock.Duration, io: Io) Io.Cancelable!void {
         return d.sleep(io);
     }
 

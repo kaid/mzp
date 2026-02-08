@@ -205,7 +205,9 @@ pub const Capability = struct {
             try server.sendResult(req.id, types.CreateTaskResult{ .task = created_task });
             try server.sendNotification("notifications/tasks/status", created_task);
 
+            const io = server.io.?;
             try tasks.enqueueToolJob(
+                io,
                 tool_info.handler,
                 tool_info.user_data,
                 name,
@@ -217,9 +219,10 @@ pub const Capability = struct {
         }
 
         // synchronous mode: tasks are disabled or the client did not provide params.task.
+        const io2 = server.io.?;
         var active: @TypeOf(server.*).ActiveRequest = .{ .id = req.id };
-        cancellation_mod.registerActiveRequest(server, &active);
-        defer cancellation_mod.unregisterActiveRequest(server, &active);
+        cancellation_mod.registerActiveRequest(server, io2, &active);
+        defer cancellation_mod.unregisterActiveRequest(server, io2, &active);
 
         const cancel = common.CancellationToken{ .cancelled = &active.cancelled };
         const a = server.getAllocator();

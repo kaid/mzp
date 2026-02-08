@@ -2,15 +2,15 @@ const std = @import("std");
 const jsonrpc = @import("../jsonrpc.zig");
 const typed_codec = @import("../serde/typed_codec.zig");
 
-pub fn registerActiveRequest(self: anytype, req: *(@TypeOf(self.*).ActiveRequest)) void {
-    self.active_requests_mutex.lock();
-    defer self.active_requests_mutex.unlock();
+pub fn registerActiveRequest(self: anytype, io: std.Io, req: *(@TypeOf(self.*).ActiveRequest)) void {
+    self.active_requests_mutex.lockUncancelable(io);
+    defer self.active_requests_mutex.unlock(io);
     self.active_requests.append(self.getAllocator(), req) catch {};
 }
 
-pub fn unregisterActiveRequest(self: anytype, req: *(@TypeOf(self.*).ActiveRequest)) void {
-    self.active_requests_mutex.lock();
-    defer self.active_requests_mutex.unlock();
+pub fn unregisterActiveRequest(self: anytype, io: std.Io, req: *(@TypeOf(self.*).ActiveRequest)) void {
+    self.active_requests_mutex.lockUncancelable(io);
+    defer self.active_requests_mutex.unlock(io);
     var i: usize = 0;
     while (i < self.active_requests.items.len) : (i += 1) {
         if (self.active_requests.items[i] == req) {
@@ -20,7 +20,7 @@ pub fn unregisterActiveRequest(self: anytype, req: *(@TypeOf(self.*).ActiveReque
     }
 }
 
-pub fn handleCancelledNotification(self: anytype, notif: jsonrpc.Notification) void {
+pub fn handleCancelledNotification(self: anytype, io: std.Io, notif: jsonrpc.Notification) void {
     const params = notif.params orelse return;
 
     var arena = std.heap.ArenaAllocator.init(self.getAllocator());
@@ -34,8 +34,8 @@ pub fn handleCancelledNotification(self: anytype, notif: jsonrpc.Notification) v
     const parsed = typed_codec.valueToTyped(a, ParamsMapper, params) catch return;
     const rid = parsed.requestId;
 
-    self.active_requests_mutex.lock();
-    defer self.active_requests_mutex.unlock();
+    self.active_requests_mutex.lockUncancelable(io);
+    defer self.active_requests_mutex.unlock(io);
     for (self.active_requests.items) |active| {
         if (active.id.eql(rid)) {
             active.cancelled.store(true, .release);

@@ -21,14 +21,15 @@ pub const Capability = struct {
     worker_allocator: ?std.mem.Allocator = null,
     enabled: bool,
     task_workers: usize,
+    io: ?std.Io = null,
 
-    tasks_mutex: std.Thread.Mutex = .{},
+    tasks_mutex: std.Io.Mutex = .init,
     tasks: std.StringHashMap(*TaskRecord),
     task_order: std.ArrayList([]const u8) = .empty,
     next_task_seq: u64 = 1,
 
-    jobs_mutex: std.Thread.Mutex = .{},
-    jobs_cv: std.Thread.Condition = .{},
+    jobs_mutex: std.Io.Mutex = .init,
+    jobs_cv: std.Io.Condition = .init,
     jobs: std.ArrayList(*TaskJob) = .empty,
     workers: std.ArrayList(std.Thread) = .empty,
     workers_started: bool = false,
@@ -84,12 +85,18 @@ pub const Capability = struct {
         self.stopWorkers();
 
         // Free queued jobs that never ran.
-        self.jobs_mutex.lock();
-        var pending = self.jobs;
-        self.jobs = .empty;
-        self.jobs_mutex.unlock();
-        for (pending.items) |j| self.freeJob(j);
-        pending.deinit(self.allocator);
+        if (self.io) |io| {
+            self.jobs_mutex.lockUncancelable(io);
+            var pending = self.jobs;
+            self.jobs = .empty;
+            self.jobs_mutex.unlock(io);
+            for (pending.items) |j| self.freeJob(j);
+            pending.deinit(self.allocator);
+        } else {
+            // If no io available, just free jobs without locking
+            for (self.jobs.items) |j| self.freeJob(j);
+            self.jobs.deinit(self.allocator);
+        }
 
         self.freeAllTasks();
         self.tasks.deinit();
@@ -100,6 +107,10 @@ pub const Capability = struct {
 
     pub fn setStatusNotifier(self: *Capability, notifier: StatusNotifier) void {
         self.status_notifier = notifier;
+    }
+
+    pub fn setIo(self: *Capability, io: std.Io) void {
+        self.io = io;
     }
 
     pub fn ensureWorkersStarted(self: *Capability) !void {
@@ -119,8 +130,9 @@ pub const Capability = struct {
     fn stopWorkers(self: *Capability) void {
         if (!self.workers_started) return;
 
+        const io = self.io orelse return;
         self.shutting_down.store(true, .release);
-        self.jobs_cv.broadcast();
+        self.jobs_cv.broadcast(io);
 
         for (self.workers.items) |th| th.join();
         self.workers.clearRetainingCapacity();
@@ -128,31 +140,32 @@ pub const Capability = struct {
     }
 
     fn workerMain(self: *Capability) void {
+        const io = self.io orelse return;
         while (true) {
             var job: ?*TaskJob = null;
 
-            self.jobs_mutex.lock();
+            self.jobs_mutex.lockUncancelable(io);
             while (self.jobs.items.len == 0 and !self.shutting_down.load(.acquire)) {
-                self.jobs_cv.wait(&self.jobs_mutex);
+                self.jobs_cv.wait(io, &self.jobs_mutex) catch break;
             }
             if (self.shutting_down.load(.acquire) and self.jobs.items.len == 0) {
-                self.jobs_mutex.unlock();
+                self.jobs_mutex.unlock(io);
                 break;
             }
             job = self.jobs.pop();
-            self.jobs_mutex.unlock();
+            self.jobs_mutex.unlock(io);
 
             const j = job.?;
-            self.runJob(j);
+            self.runJob(io, j);
             self.freeJob(j);
         }
     }
 
-    fn runJob(self: *Capability, job: *TaskJob) void {
+    fn runJob(self: *Capability, io: std.Io, job: *TaskJob) void {
         const a = self.taskAllocator();
         const cancel = common.CancellationToken{ .cancelled = &job.task.cancelled };
         if (cancel.isCancelled()) {
-            self.finalizeTaskCancelled(job.task) catch {};
+            self.finalizeTaskCancelled(io, job.task) catch {};
             self.notifyStatus(self.snapshotTask(job.task));
             return;
         }
@@ -164,7 +177,7 @@ pub const Capability = struct {
         var args_val: ?json.Value = null;
         if (job.args_json) |s| {
             var parsed = json.parseFromSlice(json.Value, aa, s, .{}) catch {
-                self.finalizeTaskWithPayload(job.task, .failed, "{\"content\":[],\"isError\":true}", "Invalid arguments JSON") catch {};
+                self.finalizeTaskWithPayload(io, job.task, .failed, "{\"content\":[],\"isError\":true}", "Invalid arguments JSON") catch {};
                 self.notifyStatus(self.snapshotTask(job.task));
                 return;
             };
@@ -181,20 +194,20 @@ pub const Capability = struct {
         defer result.deinit();
 
         const payload_json = types.stringifyJsonAlloc(a, result.toSerializable()) catch {
-            self.finalizeTaskCancelled(job.task) catch {};
+            self.finalizeTaskCancelled(io, job.task) catch {};
             self.notifyStatus(self.snapshotTask(job.task));
             return;
         };
         defer a.free(payload_json);
 
         if (cancel.isCancelled()) {
-            self.finalizeTaskCancelled(job.task) catch {};
+            self.finalizeTaskCancelled(io, job.task) catch {};
             self.notifyStatus(self.snapshotTask(job.task));
             return;
         }
 
         const status: types.TaskStatus = if (result.isError) .failed else .completed;
-        self.finalizeTaskWithPayload(job.task, status, payload_json, null) catch {};
+        self.finalizeTaskWithPayload(io, job.task, status, payload_json, null) catch {};
         self.notifyStatus(self.snapshotTask(job.task));
     }
 
@@ -204,9 +217,13 @@ pub const Capability = struct {
     }
 
     fn snapshotTask(self: *Capability, rec: *TaskRecord) types.Task {
-        self.tasks_mutex.lock();
+        const io = self.io orelse {
+            // Fallback: return without locking if no io available
+            return rec.task;
+        };
+        self.tasks_mutex.lockUncancelable(io);
         const copy = rec.task;
-        self.tasks_mutex.unlock();
+        self.tasks_mutex.unlock(io);
         return copy;
     }
 
@@ -219,8 +236,10 @@ pub const Capability = struct {
     }
 
     fn freeAllTasks(self: *Capability) void {
-        self.tasks_mutex.lock();
-        defer self.tasks_mutex.unlock();
+        if (self.io) |io| {
+            self.tasks_mutex.lockUncancelable(io);
+            defer self.tasks_mutex.unlock(io);
+        }
 
         var it = self.tasks.valueIterator();
         while (it.next()) |rec_ptr| {
@@ -236,8 +255,9 @@ pub const Capability = struct {
     };
 
     pub fn createTask(self: *Capability, params: TaskParams) !*TaskRecord {
-        self.tasks_mutex.lock();
-        defer self.tasks_mutex.unlock();
+        const io = self.io orelse return error.IoNotSet;
+        self.tasks_mutex.lockUncancelable(io);
+        defer self.tasks_mutex.unlock(io);
 
         const seq = self.next_task_seq;
         self.next_task_seq += 1;
@@ -247,7 +267,7 @@ pub const Capability = struct {
         const id = try std.fmt.allocPrint(a, "task-{d}", .{seq});
         errdefer a.free(id);
 
-        const created_at = try allocIsoTimestamp(a);
+        const created_at = try allocIsoTimestamp(a, io);
         errdefer a.free(created_at);
         const updated_at = try a.dupe(u8, created_at);
         errdefer a.free(updated_at);
@@ -274,6 +294,7 @@ pub const Capability = struct {
 
     pub fn enqueueToolJob(
         self: *Capability,
+        io: std.Io,
         handler: common.ToolHandler,
         user_data: ?*anyopaque,
         tool_name: []const u8,
@@ -312,11 +333,11 @@ pub const Capability = struct {
             .progress_token_owned = progress_token_owned,
         };
 
-        self.jobs_mutex.lock();
-        errdefer self.jobs_mutex.unlock();
+        self.jobs_mutex.lockUncancelable(io);
+        errdefer self.jobs_mutex.unlock(io);
         try self.jobs.append(self.allocator, job);
-        self.jobs_mutex.unlock();
-        self.jobs_cv.signal();
+        self.jobs_mutex.unlock(io);
+        self.jobs_cv.signal(io);
     }
 
     pub fn handleList(self: *Capability, server: anytype, req: jsonrpc.Request) !void {
@@ -358,9 +379,10 @@ pub const Capability = struct {
         var next_cursor: ?[]const u8 = null;
         var next_buf: [32]u8 = undefined;
 
+        const io = self.io orelse return error.IoNotSet;
         var locked = true;
-        self.tasks_mutex.lock();
-        defer if (locked) self.tasks_mutex.unlock();
+        self.tasks_mutex.lockUncancelable(io);
+        defer if (locked) self.tasks_mutex.unlock(io);
 
         if (start > self.task_order.items.len) {
             try server.sendError(jsonrpc.Error.invalidParams(req.id, "Cursor out of range"));
@@ -381,7 +403,7 @@ pub const Capability = struct {
         }
 
         locked = false;
-        self.tasks_mutex.unlock();
+        self.tasks_mutex.unlock(io);
 
         try server.sendResult(req.id, types.ListTasksResult{
             .tasks = tasks_list.items,
@@ -406,9 +428,10 @@ pub const Capability = struct {
             return;
         };
 
-        self.tasks_mutex.lock();
+        const io = self.io orelse return error.IoNotSet;
+        self.tasks_mutex.lockUncancelable(io);
         const rec = self.tasks.get(id);
-        self.tasks_mutex.unlock();
+        self.tasks_mutex.unlock(io);
 
         if (rec == null) {
             try server.sendError(jsonrpc.Error.invalidParams(req.id, "Unknown task"));
@@ -434,9 +457,10 @@ pub const Capability = struct {
             return;
         };
 
-        self.tasks_mutex.lock();
+        const io = self.io orelse return error.IoNotSet;
+        self.tasks_mutex.lockUncancelable(io);
         const rec = self.tasks.get(id) orelse {
-            self.tasks_mutex.unlock();
+            self.tasks_mutex.unlock(io);
             try server.sendError(jsonrpc.Error.invalidParams(req.id, "Unknown task"));
             return;
         };
@@ -446,7 +470,7 @@ pub const Capability = struct {
         const was_terminal = rec.task.status == .completed or rec.task.status == .failed or rec.task.status == .cancelled;
         if (!was_terminal) {
             const a = self.taskAllocator();
-            try setTaskStatusLocked(a, rec, .cancelled, "Cancelled");
+            try setTaskStatusLocked(a, io, rec, .cancelled, "Cancelled");
             if (rec.payload_json == null) {
                 var cancel_result = types.OwnedCallToolResult.init(a);
                 defer cancel_result.deinit();
@@ -456,7 +480,7 @@ pub const Capability = struct {
             }
         }
         const task_copy = rec.task;
-        self.tasks_mutex.unlock();
+        self.tasks_mutex.unlock(io);
 
         if (!was_terminal) {
             try server.sendNotification("notifications/tasks/status", task_copy);
@@ -484,13 +508,14 @@ pub const Capability = struct {
         var task_id: ?[]const u8 = null;
         var status: ?types.TaskStatus = null;
 
-        self.tasks_mutex.lock();
+        const io = self.io orelse return error.IoNotSet;
+        self.tasks_mutex.lockUncancelable(io);
         if (self.tasks.get(id)) |rec| {
             payload = rec.payload_json;
             task_id = rec.task.id;
             status = rec.task.status;
         }
-        self.tasks_mutex.unlock();
+        self.tasks_mutex.unlock(io);
 
         if (payload == null or task_id == null or status == null) {
             try server.sendError(jsonrpc.Error.invalidParams(req.id, "Unknown task"));
@@ -534,13 +559,14 @@ pub const Capability = struct {
 
     pub fn finalizeTaskWithPayload(
         self: *Capability,
+        io: std.Io,
         rec: *TaskRecord,
         status: types.TaskStatus,
         payload_json: []const u8,
         status_message: ?[]const u8,
     ) !void {
-        self.tasks_mutex.lock();
-        defer self.tasks_mutex.unlock();
+        self.tasks_mutex.lockUncancelable(io);
+        defer self.tasks_mutex.unlock(io);
 
         if (rec.cancelled.load(.acquire)) return;
 
@@ -548,17 +574,17 @@ pub const Capability = struct {
         if (rec.payload_json) |p| a.free(p);
         rec.payload_json = try a.dupe(u8, payload_json);
 
-        try setTaskStatusLocked(a, rec, status, status_message);
+        try setTaskStatusLocked(a, io, rec, status, status_message);
     }
 
-    pub fn finalizeTaskCancelled(self: *Capability, rec: *TaskRecord) !void {
-        self.tasks_mutex.lock();
-        errdefer self.tasks_mutex.unlock();
+    pub fn finalizeTaskCancelled(self: *Capability, io: std.Io, rec: *TaskRecord) !void {
+        self.tasks_mutex.lockUncancelable(io);
+        errdefer self.tasks_mutex.unlock(io);
         rec.cancelled.store(true, .release);
 
         if (rec.task.status != .cancelled) {
             const a = self.taskAllocator();
-            try setTaskStatusLocked(a, rec, .cancelled, "Cancelled");
+            try setTaskStatusLocked(a, io, rec, .cancelled, "Cancelled");
         }
 
         if (rec.payload_json == null) {
@@ -570,7 +596,7 @@ pub const Capability = struct {
             rec.payload_json = try types.stringifyJsonAlloc(a, cancel_result.toSerializable());
         }
 
-        self.tasks_mutex.unlock();
+        self.tasks_mutex.unlock(io);
     }
 
     pub fn handleNotification(self: *Capability, server: anytype, notif: jsonrpc.Notification) !void {
@@ -625,21 +651,10 @@ fn getTaskIdParamValue(params: json.Value) ?[]const u8 {
     return null;
 }
 
-fn allocIsoTimestamp(allocator: std.mem.Allocator) ![]u8 {
-    const now: u64 = switch (builtin.os.tag) {
-        .windows => blk: {
-            const windows = std.os.windows;
-            var ft: windows.FILETIME = undefined;
-            GetSystemTimeAsFileTime(&ft);
-            const secs_i: i64 = windows.fileTimeToNanoSeconds(ft).toSeconds();
-            break :blk if (secs_i < 0) 0 else @as(u64, @intCast(secs_i));
-        },
-        else => blk: {
-            const ts = std.posix.clock_gettime(std.posix.CLOCK.REALTIME) catch std.posix.timespec{ .sec = 0, .nsec = 0 };
-            const sec_i = ts.sec;
-            break :blk if (sec_i < 0) 0 else @as(u64, @intCast(sec_i));
-        },
-    };
+fn allocIsoTimestamp(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
+    const timestamp = std.Io.Clock.Timestamp.now(io, .real);
+    const raw_seconds: i128 = @divFloor(timestamp.raw.nanoseconds, std.time.ns_per_s);
+    const now: u64 = if (raw_seconds < 0) 0 else @intCast(raw_seconds);
     const es = std.time.epoch.EpochSeconds{ .secs = now };
     const yd = es.getEpochDay().calculateYearDay();
     const md = yd.calculateMonthDay();
@@ -671,10 +686,10 @@ fn freeTaskRecord(self: *Capability, rec: *Capability.TaskRecord) void {
     a.destroy(rec);
 }
 
-fn setTaskStatusLocked(allocator: std.mem.Allocator, rec: *Capability.TaskRecord, status: types.TaskStatus, status_message: ?[]const u8) !void {
+fn setTaskStatusLocked(allocator: std.mem.Allocator, io: std.Io, rec: *Capability.TaskRecord, status: types.TaskStatus, status_message: ?[]const u8) !void {
     rec.task.status = status;
 
-    const new_updated = try allocIsoTimestamp(allocator);
+    const new_updated = try allocIsoTimestamp(allocator, io);
     allocator.free(@constCast(rec.task.updatedAt));
     rec.task.updatedAt = new_updated;
 
