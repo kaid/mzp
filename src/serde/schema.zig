@@ -8,6 +8,7 @@ pub const JsonSchema = struct {
     required: ?[]const []const u8 = null,
     items: ?*const JsonSchema = null,
     @"enum": ?[]const []const u8 = null,
+    oneOf: ?[]const JsonSchema = null,
 
     pub const Property = struct {
         name: []const u8,
@@ -53,6 +54,7 @@ fn generateSchema(comptime T: type) JsonSchema {
         .float => JsonSchema{ .type = "number" },
         .bool => JsonSchema{ .type = "boolean" },
         .@"enum" => generateEnumSchema(T),
+        .@"union" => generateUnionSchema(T),
         else => @compileError("Unsupported type for schema generation: " ++ @typeName(T)),
     };
 }
@@ -102,6 +104,26 @@ fn generateEnumSchema(comptime T: type) JsonSchema {
     };
 }
 
+fn generateUnionSchema(comptime T: type) JsonSchema {
+    const info = @typeInfo(T).@"union";
+
+    // Only support tagged unions (union(enum))
+    if (info.tag_type == null) {
+        @compileError("Unsupported untagged union for schema generation: " ++ @typeName(T));
+    }
+
+    comptime var variants: []const JsonSchema = &[_]JsonSchema{};
+
+    inline for (info.fields) |field| {
+        const variant_schema = generateSchema(field.type);
+        variants = variants ++ [_]JsonSchema{variant_schema};
+    }
+
+    return JsonSchema{
+        .oneOf = variants,
+    };
+}
+
 /// Schema for json.Value - accepts any JSON value
 fn generateAnyValueSchema() JsonSchema {
     return .{};
@@ -139,6 +161,15 @@ fn writeJsonSchema(jws: *std.json.Stringify, schema: JsonSchema) !void {
     if (schema.@"enum") |enum_vals| {
         try jws.objectField("enum");
         try jws.write(enum_vals);
+    }
+
+    if (schema.oneOf) |variants| {
+        try jws.objectField("oneOf");
+        try jws.beginArray();
+        for (variants) |variant| {
+            try writeJsonSchema(jws, variant);
+        }
+        try jws.endArray();
     }
 
     try jws.endObject();
@@ -225,4 +256,15 @@ test "generate schema for json.Value field" {
     try writeJsonSchema(&jws, js);
     try aw.writer.flush();
     try std.testing.expectEqualStrings("{}", aw.written());
+}
+
+test "generate schema for union type" {
+    const MyUnion = union(enum) {
+        int: i32,
+        string: []const u8,
+    };
+    const Args = struct {
+        value: MyUnion,
+    };
+    try expectSchema(Args, "{\"type\":\"object\",\"properties\":{\"value\":{\"oneOf\":[{\"type\":\"integer\"},{\"type\":\"string\"}]}},\"required\":[\"value\"]}");
 }
