@@ -334,34 +334,43 @@ pub const Client = struct {
 
         const eff_timeout = self.effectiveTimeout(timeout);
         const outcome = if (eff_timeout) |t| blk: {
-            var wait_future = try Io.concurrent(io, waitSharedPending, .{ shared, io });
-            errdefer {
-                _ = wait_future.cancel(io) catch {};
-            }
-            var sleep_future = try Io.concurrent(io, sleepDuration, .{ t, io });
-            errdefer {
-                _ = sleep_future.cancel(io) catch {};
-            }
+            // Manual race using a queue
+            const RaceResult = union(enum) {
+                wait: pending_mod.PendingRegistry.Outcome,
+                timeout: void,
+            };
+            const RaceQueue = std.Io.Queue(RaceResult);
+            var race_buf: [2]RaceResult = undefined;
+            var race_q: RaceQueue = .init(race_buf[0..]);
 
-            const selected = try Io.select(io, .{ .resp = &wait_future, .timeout = &sleep_future });
+            const WaitTask = struct {
+                fn run(sp: *pending_mod.PendingRegistry.SharedPending, io_: Io, q: *RaceQueue) anyerror!void {
+                    const outcome = try sp.pending.wait(io_);
+                    q.putOneUncancelable(io_, .{ .wait = outcome }) catch {};
+                }
+            };
+            const SleepTask = struct {
+                fn run(d: Io.Clock.Duration, io_: Io, q: *RaceQueue) anyerror!void {
+                    try d.sleep(io_);
+                    q.putOneUncancelable(io_, .{ .timeout = {} }) catch {};
+                }
+            };
+
+            var wait_future = try Io.concurrent(io, WaitTask.run, .{ shared, io, &race_q });
+            errdefer _ = wait_future.cancel(io) catch {};
+            var sleep_future = try Io.concurrent(io, SleepTask.run, .{ t, io, &race_q });
+            errdefer _ = sleep_future.cancel(io) catch {};
+
+            const selected = try race_q.getOne(io);
             switch (selected) {
-                .resp => |res| {
+                .wait => |outcome| {
                     _ = sleep_future.cancel(io) catch {};
-                    break :blk try res;
+                    break :blk outcome;
                 },
-                .timeout => |sleep_res| {
-                    // Propagate sleep errors (e.g. UnsupportedClock / Canceled) if any.
-                    try sleep_res;
-                    const wait_res = wait_future.cancel(io);
-                    if (wait_res) |o| {
-                        break :blk o;
-                    } else |err| switch (err) {
-                        error.Canceled => {
-                            self.sendCancelledNotification(id);
-                            return error.RequestTimeout;
-                        },
-                        error.Closed => return error.ConnectionClosed,
-                    }
+                .timeout => {
+                    _ = wait_future.cancel(io) catch {};
+                    self.sendCancelledNotification(id);
+                    return error.RequestTimeout;
                 },
             }
         } else blk: {
