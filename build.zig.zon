@@ -9,7 +9,8 @@
             .hash = "izomorph-0.0.0--ctBEldHAQDTHaa2QCR7wIoldFsv98yUboWXEyEVH9Ru",
         },
         .zjema = .{
-            .path = "../zjema",
+            .url = "https://github.com/kaid/zjema/archive/refs/heads/trunk.tar.gz",
+            .hash = "zjema-0.16.0-dev.2637+6a9510c0e-8vMphkaaAQBk3ayR3EnxumXcGp8Sn6UTDaCPBXxokuVM",
         },
     },
     .paths = .{
