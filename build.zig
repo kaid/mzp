@@ -4,11 +4,13 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const izo_dep = b.dependency("izo", .{});
+    const zjema_dep = b.dependency("zjema", .{});
     const mod = b.addModule("mzp", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .imports = &.{
             .{ .name = "izomorph", .module = izo_dep.module("izomorph") },
+            .{ .name = "zjema", .module = zjema_dep.module("zjema") },
         },
     });
 

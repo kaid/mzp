@@ -6,7 +6,7 @@ const common = @import("../common.zig");
 const cancellation_mod = @import("../cancellation.zig");
 const tasks_mod = @import("tasks.zig");
 const typed_codec = @import("../../serde/typed_codec.zig");
-const schema = @import("../../serde/schema.zig");
+const schema = @import("zjema").schema;
 
 pub const Capability = struct {
     allocator: std.mem.Allocator,
@@ -90,7 +90,7 @@ pub const Capability = struct {
             .tool = .{
                 .name = name,
                 .description = description,
-                .inputSchema = schema.generate(Args),
+                .inputSchema = schema.toSchema(Args),
             },
             .handler = Adapter.bridge,
             .user_data = user_data orelse self.default_user_data,
@@ -258,3 +258,47 @@ pub const Capability = struct {
         };
     }
 };
+
+test "Tool serialization with generated schema" {
+    const allocator = std.testing.allocator;
+    const TestArgs = struct {
+        name: []const u8,
+        count: i32,
+    };
+
+    const tool = types.Tool{
+        .name = "test_tool",
+        .description = "A test tool",
+        .inputSchema = schema.toSchema(TestArgs),
+    };
+
+    // Verify we can serialize the tool (which contains a JsonSchema)
+    const json_str = try types.stringifyJsonAlloc(allocator, tool);
+    defer allocator.free(json_str);
+
+    // Basic validation
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "test_tool") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "inputSchema") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "properties") != null);
+}
+
+test "Tool with enum field schema generation" {
+    const Color = enum { red, green, blue };
+    const TestArgs = struct {
+        color: Color,
+    };
+
+    const tool = types.Tool{
+        .name = "color_tool",
+        .inputSchema = schema.toSchema(TestArgs),
+    };
+
+    const allocator = std.testing.allocator;
+    const json_str = try types.stringifyJsonAlloc(allocator, tool);
+    defer allocator.free(json_str);
+
+    // Check enum values are present in schema
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "red") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "green") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "blue") != null);
+}

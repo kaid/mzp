@@ -216,7 +216,7 @@ pub const OwnedListRootsResult = struct {
     }
 };
 
-const schema = @import("serde/schema.zig");
+const schema = @import("zjema").schema;
 
 pub const Tool = struct {
     name: []const u8,

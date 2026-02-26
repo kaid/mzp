@@ -8,7 +8,7 @@ pub const client = @import("client.zig");
 pub const serde = struct {
     pub const typed_codec = @import("serde/typed_codec.zig");
     pub const envelope_codec = @import("serde/envelope_codec.zig");
-    pub const schema = @import("serde/schema.zig");
+    pub const schema = @import("zjema").schema;
 };
 pub const typed_registry = @import("typed_registry.zig");
 
