@@ -177,40 +177,17 @@ pub const Error = struct {
 };
 
 // ============================================================================
-// Raw Message Types - For parsing with json.Value (type erasure)
+// Raw Message Types - Aliases for parsing with json.Value (type erasure)
 // ============================================================================
 
 /// Non-generic Request for parsing (params stored as json.Value)
-pub const RawRequest = struct {
-    jsonrpc: []const u8 = JSONRPC_VERSION,
-    id: RequestId,
-    method: []const u8,
-    params: ?json.Value = null,
-
-    pub const Mapper = izo.Mapper(@This(), .{
-        .params = .{ .omit_null = true },
-    });
-};
+pub const RawRequest = TypedRequest(json.Value);
 
 /// Non-generic Notification for parsing (params stored as json.Value)
-pub const RawNotification = struct {
-    jsonrpc: []const u8 = JSONRPC_VERSION,
-    method: []const u8,
-    params: ?json.Value = null,
-
-    pub const Mapper = izo.Mapper(@This(), .{
-        .params = .{ .omit_null = true },
-    });
-};
+pub const RawNotification = TypedNotification(json.Value);
 
 /// Non-generic Response for parsing (result stored as json.Value)
-pub const RawResponse = struct {
-    jsonrpc: []const u8 = JSONRPC_VERSION,
-    id: RequestId,
-    result: json.Value,
-
-    pub const Mapper = izo.Mapper(@This(), .{});
-};
+pub const RawResponse = TypedResponse(json.Value);
 
 /// Raw Message union for parsing incoming messages
 pub const RawMessage = union(enum) {

@@ -117,7 +117,10 @@ pub const StdioTransport = struct {
 
 // Writer vtable implementation for BufferedTransport
 fn bufferedDrain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-    const self: *BufferedTransport = @ptrCast(@alignCast(w.buffer.ptr));
+    // Recover self pointer from buffer (buffer is aligned)
+    const ptr_bytes: *[@sizeOf(usize)]u8 align(@alignOf(usize)) = @alignCast(w.buffer.ptr);
+    const self_ptr_int = std.mem.readInt(usize, ptr_bytes, .little);
+    const self: *BufferedTransport = @ptrFromInt(self_ptr_int);
 
     var total: usize = 0;
     for (data) |slice| {
@@ -155,7 +158,7 @@ pub const BufferedTransport = struct {
     input_pos: usize,
     allocator: std.mem.Allocator,
     // Buffer for the writer (stores self pointer)
-    writer_buffer: [64]u8 = undefined,
+    writer_buffer: [@sizeOf(usize)]u8 align(@alignOf(usize)) = undefined,
     // Storage for the writer
     writer_storage: std.Io.Writer = undefined,
 
@@ -235,9 +238,9 @@ pub const BufferedTransport = struct {
 
     fn getWriterImpl(transport_ptr: *Transport, _: std.Io) *std.Io.Writer {
         const self: *BufferedTransport = @fieldParentPtr("transport", transport_ptr);
-        // Store self pointer in buffer
-        const self_ptr_bytes = std.mem.asBytes(&self);
-        @memcpy(self.writer_buffer[0..self_ptr_bytes.len], self_ptr_bytes);
+        // Store self pointer in buffer using integer encoding
+        const self_ptr: usize = @intFromPtr(self);
+        std.mem.writeInt(usize, @ptrCast(self.writer_buffer[0..@sizeOf(usize)]), self_ptr, .little);
 
         self.writer_storage = .{
             .vtable = &buffered_vtable,
@@ -259,7 +262,7 @@ pub const DuplexTransport = struct {
         outbound: *Channel,
         // Storage for the writer
         writer_storage: std.Io.Writer = undefined,
-        writer_buffer: [64]u8 = undefined,
+        writer_buffer: [@sizeOf(usize)]u8 align(@alignOf(usize)) = undefined,
         // Stored io for writer operations
         io: std.Io = undefined,
 
@@ -388,8 +391,9 @@ pub const DuplexTransport = struct {
 
 // Writer vtable implementation for DuplexTransport endpoints
 fn duplexDrain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-    // Recover endpoint pointer from buffer
-    const ep_ptr_int = std.mem.readInt(usize, @ptrCast(w.buffer.ptr[0..@sizeOf(usize)]), .little);
+    // Recover endpoint pointer from buffer (buffer is aligned)
+    const ptr_bytes: *[@sizeOf(usize)]u8 align(@alignOf(usize)) = @alignCast(w.buffer.ptr);
+    const ep_ptr_int = std.mem.readInt(usize, ptr_bytes, .little);
     const ep: *DuplexTransport.Endpoint = @ptrFromInt(ep_ptr_int);
 
     // Calculate total size
