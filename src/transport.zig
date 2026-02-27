@@ -115,12 +115,13 @@ pub const StdioTransport = struct {
     }
 };
 
+// Thread-local storage for current BufferedTransport pointer
+threadlocal var current_buffered_transport: ?*BufferedTransport = null;
+
 // Writer vtable implementation for BufferedTransport
-fn bufferedDrain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-    // Recover self pointer from buffer (buffer is aligned)
-    const ptr_bytes: *[@sizeOf(usize)]u8 align(@alignOf(usize)) = @alignCast(w.buffer.ptr);
-    const self_ptr_int = std.mem.readInt(usize, ptr_bytes, .little);
-    const self: *BufferedTransport = @ptrFromInt(self_ptr_int);
+fn bufferedDrain(_: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+    // Get transport from thread-local storage
+    const self = current_buffered_transport orelse return error.WriteFailed;
 
     var total: usize = 0;
     for (data) |slice| {
@@ -157,10 +158,10 @@ pub const BufferedTransport = struct {
     output: std.ArrayList(u8),
     input_pos: usize,
     allocator: std.mem.Allocator,
-    // Buffer for the writer (stores self pointer)
-    writer_buffer: [@sizeOf(usize)]u8 align(@alignOf(usize)) = undefined,
     // Storage for the writer
     writer_storage: std.Io.Writer = undefined,
+    // Buffer for writer operations
+    writer_buffer: [4096]u8 = undefined,
 
     pub fn init(allocator: std.mem.Allocator) BufferedTransport {
         const self: BufferedTransport = .{
@@ -238,13 +239,12 @@ pub const BufferedTransport = struct {
 
     fn getWriterImpl(transport_ptr: *Transport, _: std.Io) *std.Io.Writer {
         const self: *BufferedTransport = @fieldParentPtr("transport", transport_ptr);
-        // Store self pointer in buffer using integer encoding
-        const self_ptr: usize = @intFromPtr(self);
-        std.mem.writeInt(usize, @ptrCast(self.writer_buffer[0..@sizeOf(usize)]), self_ptr, .little);
+        // Store self pointer in thread-local storage
+        current_buffered_transport = self;
 
         self.writer_storage = .{
             .vtable = &buffered_vtable,
-            .buffer = self.writer_buffer[0..],
+            .buffer = &self.writer_buffer,
             .end = 0,
         };
         return &self.writer_storage;
@@ -262,7 +262,8 @@ pub const DuplexTransport = struct {
         outbound: *Channel,
         // Storage for the writer
         writer_storage: std.Io.Writer = undefined,
-        writer_buffer: [@sizeOf(usize)]u8 align(@alignOf(usize)) = undefined,
+        // Buffer for writer operations
+        writer_buffer: [4096]u8 = undefined,
         // Stored io for writer operations
         io: std.Io = undefined,
 
@@ -376,25 +377,25 @@ pub const DuplexTransport = struct {
         // Store io for later use in drain
         ep.io = io;
 
-        // Store ep pointer in buffer using a simple cast
-        const ep_ptr: usize = @intFromPtr(ep);
-        std.mem.writeInt(usize, @ptrCast(ep.writer_buffer[0..@sizeOf(usize)]), ep_ptr, .little);
+        // Store ep pointer in thread-local storage
+        current_duplex_ep = ep;
 
         ep.writer_storage = .{
             .vtable = &duplex_vtable,
-            .buffer = ep.writer_buffer[0..],
+            .buffer = &ep.writer_buffer,
             .end = 0,
         };
         return &ep.writer_storage;
     }
 };
 
+// Thread-local storage for current endpoint pointer
+threadlocal var current_duplex_ep: ?*DuplexTransport.Endpoint = null;
+
 // Writer vtable implementation for DuplexTransport endpoints
-fn duplexDrain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-    // Recover endpoint pointer from buffer (buffer is aligned)
-    const ptr_bytes: *[@sizeOf(usize)]u8 align(@alignOf(usize)) = @alignCast(w.buffer.ptr);
-    const ep_ptr_int = std.mem.readInt(usize, ptr_bytes, .little);
-    const ep: *DuplexTransport.Endpoint = @ptrFromInt(ep_ptr_int);
+fn duplexDrain(_: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+    // Get endpoint from thread-local storage
+    const ep = current_duplex_ep orelse return error.WriteFailed;
 
     // Calculate total size
     var total_len: usize = 0;
