@@ -260,9 +260,9 @@ pub const DuplexTransport = struct {
         allocator: std.mem.Allocator,
         inbound: *Channel,
         outbound: *Channel,
-        // Storage for the writer
+        // Writer that writes directly to the outbound queue
         writer_storage: std.Io.Writer = undefined,
-        // Buffer for writer operations
+        // Fixed buffer for writer operations
         writer_buffer: [4096]u8 = undefined,
         // Stored io for writer operations
         io: std.Io = undefined,
@@ -374,12 +374,10 @@ pub const DuplexTransport = struct {
 
     fn endpointGetWriter(transport_ptr: *Transport, io: std.Io) *std.Io.Writer {
         const ep: *Endpoint = @fieldParentPtr("transport", transport_ptr);
-        // Store io for later use in drain
+        // Store io for later use
         ep.io = io;
 
-        // Store ep pointer in thread-local storage
-        current_duplex_ep = ep;
-
+        // Use a fixed buffer from the endpoint struct
         ep.writer_storage = .{
             .vtable = &duplex_vtable,
             .buffer = &ep.writer_buffer,
@@ -389,14 +387,8 @@ pub const DuplexTransport = struct {
     }
 };
 
-// Thread-local storage for current endpoint pointer
-threadlocal var current_duplex_ep: ?*DuplexTransport.Endpoint = null;
-
 // Writer vtable implementation for DuplexTransport endpoints
-fn duplexDrain(_: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-    // Get endpoint from thread-local storage
-    const ep = current_duplex_ep orelse return error.WriteFailed;
-
+fn duplexDrain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
     // Calculate total size
     var total_len: usize = 0;
     for (data) |slice| {
@@ -406,35 +398,50 @@ fn duplexDrain(_: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io
         total_len += data[data.len - 1].len * splat;
     }
 
-    // Allocate and copy data
-    const combined = ep.allocator.alloc(u8, total_len) catch return error.WriteFailed;
-    errdefer ep.allocator.free(combined);
+    // Check if there's enough space in the writer buffer
+    if (w.end + total_len > w.buffer.len) {
+        return error.WriteFailed;
+    }
 
-    var pos: usize = 0;
+    // Copy data directly to writer buffer
     for (data) |slice| {
-        @memcpy(combined[pos..][0..slice.len], slice);
-        pos += slice.len;
+        @memcpy(w.buffer[w.end..][0..slice.len], slice);
+        w.end += slice.len;
     }
     if (splat > 0 and data.len > 0) {
         const last = data[data.len - 1];
         var i: usize = 0;
         while (i < splat) : (i += 1) {
-            @memcpy(combined[pos..][0..last.len], last);
-            pos += last.len;
+            @memcpy(w.buffer[w.end..][0..last.len], last);
+            w.end += last.len;
         }
     }
-
-    // Send to queue using stored io
-    ep.outbound.queue.putOne(ep.io, combined) catch |err| switch (err) {
-        error.Canceled => return error.WriteFailed,
-        error.Closed => return error.WriteFailed,
-    };
 
     return total_len;
 }
 
+fn duplexFlush(w: *std.Io.Writer) std.Io.Writer.Error!void {
+    if (w.end == 0) return;
+
+    // Get the endpoint from the writer context
+    const ep: *DuplexTransport.Endpoint = @alignCast(@fieldParentPtr("writer_storage", w));
+
+    // Allocate and send the data
+    const data = ep.allocator.dupe(u8, w.buffer[0..w.end]) catch return error.WriteFailed;
+    errdefer ep.allocator.free(data);
+
+    ep.outbound.queue.putOne(ep.io, data) catch |err| switch (err) {
+        error.Canceled => return error.WriteFailed,
+        error.Closed => return error.WriteFailed,
+    };
+
+    // Clear the buffer
+    w.end = 0;
+}
+
 const duplex_vtable: std.Io.Writer.VTable = .{
     .drain = duplexDrain,
+    .flush = duplexFlush,
 };
 
 test "BufferedTransport basic" {
