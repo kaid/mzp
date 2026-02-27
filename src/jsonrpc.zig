@@ -4,6 +4,9 @@ const izo = @import("izomorph");
 
 pub const JSONRPC_VERSION = "2.0";
 
+// ============================================================================
+// RequestId - unchanged
+// ============================================================================
 pub const RequestId = union(enum) {
     string: []const u8,
     number: i64,
@@ -37,6 +40,9 @@ pub const RequestId = union(enum) {
     }
 };
 
+// ============================================================================
+// ErrorCode - unchanged
+// ============================================================================
 pub const ErrorCode = enum(i32) {
     parse_error = -32700,
     invalid_request = -32600,
@@ -49,51 +55,73 @@ pub const ErrorCode = enum(i32) {
     pub const Mapper = izo.Mapper(ErrorCode, .{ .enum_strategy = .bare });
 };
 
+// ============================================================================
+// ErrorData - unchanged
+// ============================================================================
 pub const ErrorData = struct {
     code: ErrorCode,
     message: []const u8,
     data: ?json.Value = null,
 
     pub const Mapper = izo.Mapper(ErrorData, .{
-        .skip_fields = .{"data"},
-        .add_custom = .{
-            .{ .name = "data", .optional = true },
-        },
+        .data = .{ .omit_null = true },
     });
 };
 
-pub const Request = struct {
-    jsonrpc: []const u8 = JSONRPC_VERSION,
-    id: RequestId,
-    method: []const u8,
-    params: ?json.Value = null,
+// ============================================================================
+// Typed Message Types (Generic) - For serialization with type safety
+// ============================================================================
 
-    pub const Mapper = izo.Mapper(Request, .{
-        .skip_fields = .{"params"},
-        .add_custom = .{
-            .{ .name = "params", .optional = true },
-        },
-    });
-};
+/// Generic Request type for type-safe serialization
+/// Params: the type of request parameters (use void for no params)
+pub fn TypedRequest(comptime Params: type) type {
+    return struct {
+        jsonrpc: []const u8 = JSONRPC_VERSION,
+        id: RequestId,
+        method: []const u8,
+        params: ?Params = null,
 
-pub const Response = struct {
-    jsonrpc: []const u8 = JSONRPC_VERSION,
-    id: RequestId,
-    result: json.Value,
+        pub const Mapper = izo.Mapper(@This(), .{
+            .params = .{ .omit_null = true },
+        });
+    };
+}
 
-    pub const Mapper = izo.Mapper(Response, .{});
-};
+/// Generic Notification type for type-safe serialization
+/// Params: the type of notification parameters (use void for no params)
+pub fn TypedNotification(comptime Params: type) type {
+    return struct {
+        jsonrpc: []const u8 = JSONRPC_VERSION,
+        method: []const u8,
+        params: ?Params = null,
 
+        pub const Mapper = izo.Mapper(@This(), .{
+            .params = .{ .omit_null = true },
+        });
+    };
+}
+
+/// Generic Response type for type-safe serialization
+/// Result: the type of response result
+pub fn TypedResponse(comptime Result: type) type {
+    return struct {
+        jsonrpc: []const u8 = JSONRPC_VERSION,
+        id: RequestId,
+        result: Result,
+
+        pub const Mapper = izo.Mapper(@This(), .{});
+    };
+}
+
+/// Generic Error type
+/// Note: Error data structure is fixed per JSON-RPC spec
 pub const Error = struct {
     jsonrpc: []const u8 = JSONRPC_VERSION,
     id: ?RequestId = null,
     @"error": ErrorData,
 
-    pub const Mapper = izo.Mapper(Error, .{
-        .skip_fields = .{"id"},
-        .add_custom = .{
-            .{ .name = "id", .optional = true },
-        },
+    pub const Mapper = izo.Mapper(@This(), .{
+        .id = .{ .omit_null = true },
     });
 
     pub fn methodNotFound(id: RequestId, method: []const u8) Error {
@@ -148,35 +176,59 @@ pub const Error = struct {
     }
 };
 
-pub const Notification = struct {
+// ============================================================================
+// Raw Message Types - For parsing with json.Value (type erasure)
+// ============================================================================
+
+/// Non-generic Request for parsing (params stored as json.Value)
+pub const RawRequest = struct {
+    jsonrpc: []const u8 = JSONRPC_VERSION,
+    id: RequestId,
+    method: []const u8,
+    params: ?json.Value = null,
+
+    pub const Mapper = izo.Mapper(@This(), .{
+        .params = .{ .omit_null = true },
+    });
+};
+
+/// Non-generic Notification for parsing (params stored as json.Value)
+pub const RawNotification = struct {
     jsonrpc: []const u8 = JSONRPC_VERSION,
     method: []const u8,
     params: ?json.Value = null,
 
-    pub const Mapper = izo.Mapper(Notification, .{
-        .skip_fields = .{"params"},
-        .add_custom = .{
-            .{ .name = "params", .optional = true },
-        },
+    pub const Mapper = izo.Mapper(@This(), .{
+        .params = .{ .omit_null = true },
     });
 };
 
-pub const Message = union(enum) {
-    request: Request,
-    response: Response,
+/// Non-generic Response for parsing (result stored as json.Value)
+pub const RawResponse = struct {
+    jsonrpc: []const u8 = JSONRPC_VERSION,
+    id: RequestId,
+    result: json.Value,
+
+    pub const Mapper = izo.Mapper(@This(), .{});
+};
+
+/// Raw Message union for parsing incoming messages
+pub const RawMessage = union(enum) {
+    request: RawRequest,
+    response: RawResponse,
     @"error": Error,
-    notification: Notification,
+    notification: RawNotification,
 
-    pub const Mapper = izo.Mapper(Message, .{ .union_strategy = .bare });
+    pub const Mapper = izo.Mapper(RawMessage, .{ .union_strategy = .bare });
 
-    pub fn parse(allocator: std.mem.Allocator, input: []const u8) !Message {
+    pub fn parse(allocator: std.mem.Allocator, input: []const u8) !RawMessage {
         var parsed = try json.parseFromSlice(json.Value, allocator, input, .{});
         defer parsed.deinit();
 
         return parseFromValue(allocator, parsed.value);
     }
 
-    pub fn parseFromValue(allocator: std.mem.Allocator, value: json.Value) !Message {
+    pub fn parseFromValue(allocator: std.mem.Allocator, value: json.Value) !RawMessage {
         const obj = switch (value) {
             .object => |o| o,
             else => return error.InvalidRequest,
@@ -209,7 +261,7 @@ pub const Message = union(enum) {
         return error.InvalidRequest;
     }
 
-    fn parseRequest(allocator: std.mem.Allocator, obj: json.ObjectMap) !Request {
+    fn parseRequest(allocator: std.mem.Allocator, obj: json.ObjectMap) !RawRequest {
         const id = try parseRequestId(allocator, obj.get("id").?);
         const method_val = obj.get("method") orelse return error.InvalidRequest;
         const method = switch (method_val) {
@@ -225,7 +277,7 @@ pub const Message = union(enum) {
         };
     }
 
-    fn parseNotification(allocator: std.mem.Allocator, obj: json.ObjectMap) !Notification {
+    fn parseNotification(allocator: std.mem.Allocator, obj: json.ObjectMap) !RawNotification {
         const method_val = obj.get("method") orelse return error.InvalidRequest;
         const method = switch (method_val) {
             .string => |s| try allocator.dupe(u8, s),
@@ -239,7 +291,7 @@ pub const Message = union(enum) {
         };
     }
 
-    fn parseResponse(allocator: std.mem.Allocator, obj: json.ObjectMap) !Response {
+    fn parseResponse(allocator: std.mem.Allocator, obj: json.ObjectMap) !RawResponse {
         const id = try parseRequestId(allocator, obj.get("id").?);
         const result = try cloneValue(allocator, obj.get("result").?);
 
@@ -350,7 +402,7 @@ pub const Message = union(enum) {
         }
     }
 
-    pub fn freeRequest(allocator: std.mem.Allocator, req: Request) void {
+    pub fn freeRequest(allocator: std.mem.Allocator, req: RawRequest) void {
         freeRequestId(allocator, req.id);
         allocator.free(req.method);
         if (req.params) |p| {
@@ -358,14 +410,14 @@ pub const Message = union(enum) {
         }
     }
 
-    pub fn freeNotification(allocator: std.mem.Allocator, notif: Notification) void {
+    pub fn freeNotification(allocator: std.mem.Allocator, notif: RawNotification) void {
         allocator.free(notif.method);
         if (notif.params) |p| {
             freeValue(allocator, p);
         }
     }
 
-    pub fn freeResponse(allocator: std.mem.Allocator, resp: Response) void {
+    pub fn freeResponse(allocator: std.mem.Allocator, resp: RawResponse) void {
         freeRequestId(allocator, resp.id);
         freeValue(allocator, resp.result);
     }
@@ -376,7 +428,7 @@ pub const Message = union(enum) {
         if (err.@"error".data) |d| freeValue(allocator, d);
     }
 
-    pub fn freeMessage(allocator: std.mem.Allocator, msg: Message) void {
+    pub fn freeMessage(allocator: std.mem.Allocator, msg: RawMessage) void {
         switch (msg) {
             .request => |r| freeRequest(allocator, r),
             .notification => |n| freeNotification(allocator, n),
@@ -385,14 +437,14 @@ pub const Message = union(enum) {
         }
     }
 
-    pub fn stringify(self: Message, allocator: std.mem.Allocator) ![]u8 {
+    pub fn stringify(self: RawMessage, allocator: std.mem.Allocator) ![]u8 {
         var aw: std.Io.Writer.Allocating = .init(allocator);
         errdefer aw.deinit();
 
         try izo.json.encodeToWriter(
             &aw.writer,
             self,
-            Message.Mapper,
+            RawMessage.Mapper,
             .{},
         );
 
@@ -403,12 +455,29 @@ pub const Message = union(enum) {
     }
 };
 
+// ============================================================================
+// Backward Compatibility Aliases
+// ============================================================================
+
+/// Use RawRequest for parsing, or TypedRequest(Params) for type-safe serialization
+pub const Request = RawRequest;
+/// Use RawNotification for parsing, or TypedNotification(Params) for type-safe serialization
+pub const Notification = RawNotification;
+/// Use RawResponse for parsing, or TypedResponse(Result) for type-safe serialization
+pub const Response = RawResponse;
+/// Use RawMessage for parsing with json.Value
+pub const Message = RawMessage;
+
+// ============================================================================
+// Tests
+// ============================================================================
+
 test "parse request" {
     const input =
         \\{"jsonrpc":"2.0","id":1,"method":"test","params":{"foo":"bar"}}
     ;
-    const msg = try Message.parse(std.testing.allocator, input);
-    defer Message.freeMessage(std.testing.allocator, msg);
+    const msg = try RawMessage.parse(std.testing.allocator, input);
+    defer RawMessage.freeMessage(std.testing.allocator, msg);
 
     try std.testing.expect(msg == .request);
     try std.testing.expectEqualStrings("test", msg.request.method);
@@ -419,8 +488,8 @@ test "parse notification" {
     const input =
         \\{"jsonrpc":"2.0","method":"test"}
     ;
-    const msg = try Message.parse(std.testing.allocator, input);
-    defer Message.freeMessage(std.testing.allocator, msg);
+    const msg = try RawMessage.parse(std.testing.allocator, input);
+    defer RawMessage.freeMessage(std.testing.allocator, msg);
 
     try std.testing.expect(msg == .notification);
     try std.testing.expectEqualStrings("test", msg.notification.method);
@@ -430,10 +499,35 @@ test "parse request with string id" {
     const input =
         \\{"jsonrpc":"2.0","id":"abc","method":"test"}
     ;
-    const msg = try Message.parse(std.testing.allocator, input);
-    defer Message.freeMessage(std.testing.allocator, msg);
+    const msg = try RawMessage.parse(std.testing.allocator, input);
+    defer RawMessage.freeMessage(std.testing.allocator, msg);
 
     try std.testing.expect(msg == .request);
     try std.testing.expect(msg.request.id == .string);
     try std.testing.expectEqualStrings("abc", msg.request.id.string);
+}
+
+test "typed request serialization" {
+    const TestParams = struct {
+        foo: []const u8,
+        bar: i32,
+    };
+
+    const req = TypedRequest(TestParams){
+        .id = .{ .number = 42 },
+        .method = "test/method",
+        .params = .{ .foo = "hello", .bar = 123 },
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    try izo.json.encodeToWriter(&aw.writer, req, TypedRequest(TestParams).Mapper, .{});
+    try aw.writer.flush();
+
+    const json_str = aw.written();
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"jsonrpc\":\"2.0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"method\":\"test/method\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"id\":42") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_str, "\"foo\":\"hello\"") != null);
 }
