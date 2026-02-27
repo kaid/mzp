@@ -295,13 +295,12 @@ pub const Client = struct {
 
     fn sendCancelledNotification(self: *Client, id: jsonrpc.RequestId) void {
         const io = self.io orelse return;
-        const a = self.getAllocator();
-        const payload = envelope_codec.encodeNotificationAlloc(a, "notifications/cancelled", CancelParams{ .requestId = id }) catch return;
-        defer a.free(payload);
-
         self.io_mutex.lockUncancelable(io);
         defer self.io_mutex.unlock(io);
-        _ = self.transport.write(io, payload) catch {};
+        const writer = self.transport.getWriter(io);
+        envelope_codec.encodeNotificationToWriter(writer, "notifications/cancelled", CancelParams{ .requestId = id }) catch return;
+        writer.writeByte('\n') catch {};
+        writer.flush() catch {};
     }
 
     fn waitSharedPending(sp: *pending_mod.PendingRegistry.SharedPending, io: Io) (std.Io.QueueClosedError || std.Io.Cancelable)!pending_mod.PendingRegistry.Outcome {
@@ -314,22 +313,22 @@ pub const Client = struct {
 
     fn sendRequestWithIdTimeout(self: *Client, id: jsonrpc.RequestId, method: []const u8, params: anytype, timeout: ?Io.Clock.Duration) !json.Value {
         const io = self.io orelse return error.IoNotSet;
-        const a = self.getAllocator();
         if (!self.pending_inited) {
-            self.pending = pending_mod.PendingRegistry.init(a);
+            self.pending = pending_mod.PendingRegistry.init(self.getAllocator());
             self.pending_inited = true;
         }
         const borrowed_id = pending_mod.PendingRegistry.borrowedIdFromRequestId(id);
         const shared = try self.pending.register(io, borrowed_id);
-        defer shared.release(a, io);
+        defer shared.release(self.getAllocator(), io);
         errdefer self.pending.abandon(io, borrowed_id);
 
-        const payload = try envelope_codec.encodeRequestAlloc(a, id, method, params);
-        defer a.free(payload);
         self.io_mutex.lockUncancelable(io);
         {
             defer self.io_mutex.unlock(io);
-            try self.transport.write(io, payload);
+            const writer = self.transport.getWriter(io);
+            try envelope_codec.encodeRequestToWriter(writer, id, method, params);
+            try writer.writeByte('\n');
+            try writer.flush();
         }
 
         const eff_timeout = self.effectiveTimeout(timeout);
@@ -435,12 +434,12 @@ pub const Client = struct {
 
     fn sendNotification(self: *Client, method: []const u8, params: anytype) !void {
         const io = self.io orelse return error.IoNotSet;
-        const a = self.getAllocator();
-        const payload = try envelope_codec.encodeNotificationAlloc(a, method, params);
-        defer a.free(payload);
         self.io_mutex.lockUncancelable(io);
         defer self.io_mutex.unlock(io);
-        try self.transport.write(io, payload);
+        const writer = self.transport.getWriter(io);
+        try envelope_codec.encodeNotificationToWriter(writer, method, params);
+        try writer.writeByte('\n');
+        try writer.flush();
     }
 
     pub fn sendRootsListChanged(self: *Client) !void {
@@ -451,22 +450,22 @@ pub const Client = struct {
 
     fn sendResult(self: *Client, id: jsonrpc.RequestId, result: anytype) !void {
         const io = self.io orelse return error.IoNotSet;
-        const a = self.getAllocator();
-        const payload = try envelope_codec.encodeResponseAlloc(a, id, result);
-        defer a.free(payload);
         self.io_mutex.lockUncancelable(io);
         defer self.io_mutex.unlock(io);
-        try self.transport.write(io, payload);
+        const writer = self.transport.getWriter(io);
+        try envelope_codec.encodeResponseToWriter(writer, id, result);
+        try writer.writeByte('\n');
+        try writer.flush();
     }
 
     fn sendError(self: *Client, err: jsonrpc.Error) !void {
         const io = self.io orelse return error.IoNotSet;
-        const a = self.getAllocator();
-        const payload = try envelope_codec.encodeErrorAlloc(a, err.id, err.@"error");
-        defer a.free(payload);
         self.io_mutex.lockUncancelable(io);
         defer self.io_mutex.unlock(io);
-        try self.transport.write(io, payload);
+        const writer = self.transport.getWriter(io);
+        try envelope_codec.encodeErrorToWriter(writer, err.id, err.@"error");
+        try writer.writeByte('\n');
+        try writer.flush();
     }
 
     fn clearServerState(self: *Client) void {

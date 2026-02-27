@@ -5,154 +5,282 @@ const izo = @import("izomorph");
 
 const Io = std.Io;
 
-pub fn encodeRequestAlloc(
+/// Determines if a type is a container (struct, enum, union) that should be encoded with izo.
+fn isContainer(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .@"struct", .@"enum", .@"union" => true,
+        else => false,
+    };
+}
+
+/// Writes a JSON string value (with quotes and escaping) to the writer.
+fn writeJsonString(writer: *std.Io.Writer, str: []const u8) !void {
+    try writer.writeByte('"');
+    // Escape special characters
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i < str.len) : (i += 1) {
+        const escape: ?u8 = switch (str[i]) {
+            '\\' => '\\',
+            '"' => '"',
+            '\n' => 'n',
+            '\r' => 'r',
+            '\t' => 't',
+            0x08 => 'b',
+            0x0C => 'f',
+            else => null,
+        };
+        if (escape) |esc| {
+            if (i > start) {
+                try writer.writeAll(str[start..i]);
+            }
+            try writer.writeByte('\\');
+            try writer.writeByte(esc);
+            start = i + 1;
+        }
+    }
+    if (i > start) {
+        try writer.writeAll(str[start..i]);
+    }
+    try writer.writeByte('"');
+}
+
+/// Writes a simple value (number, bool, null) to the writer.
+fn writeSimpleValue(writer: *std.Io.Writer, value: anytype) !void {
+    const T = @TypeOf(value);
+    if (T == @TypeOf(null)) {
+        try writer.writeAll("null");
+    } else if (T == bool) {
+        try writer.writeAll(if (value) "true" else "false");
+    } else if (@typeInfo(T) == .int or @typeInfo(T) == .comptime_int) {
+        var buf: [32]u8 = undefined;
+        const str = try std.fmt.bufPrint(&buf, "{d}", .{value});
+        try writer.writeAll(str);
+    } else if (@typeInfo(T) == .float or @typeInfo(T) == .comptime_float) {
+        var buf: [64]u8 = undefined;
+        const str = try std.fmt.bufPrint(&buf, "{d}", .{value});
+        try writer.writeAll(str);
+    } else if (T == []const u8 or T == []u8) {
+        try writeJsonString(writer, value);
+    } else {
+        // Fallback for other types
+        var buf: [256]u8 = undefined;
+        const str = try std.fmt.bufPrint(&buf, "{any}", .{value});
+        try writer.writeAll(str);
+    }
+}
+
+/// Writes a value using izo for containers, direct write for simple types.
+fn writeValue(
+    writer: *std.Io.Writer,
+    value: anytype,
+) !void {
+    const T = @TypeOf(value);
+    if (T == json.Value) {
+        // For json.Value, we need to stringify it manually
+        switch (value) {
+            .null => try writer.writeAll("null"),
+            .bool => |b| try writer.writeAll(if (b) "true" else "false"),
+            .integer => |i| try writeSimpleValue(writer, i),
+            .float => |f| try writeSimpleValue(writer, f),
+            .string => |s| try writeJsonString(writer, s),
+            .array => |arr| {
+                try writer.writeByte('[');
+                for (arr.items, 0..) |item, idx| {
+                    if (idx > 0) try writer.writeByte(',');
+                    try writeValue(writer, item);
+                }
+                try writer.writeByte(']');
+            },
+            .object => |obj| {
+                try writer.writeByte('{');
+                var it = obj.iterator();
+                var idx: usize = 0;
+                while (it.next()) |entry| : (idx += 1) {
+                    if (idx > 0) try writer.writeByte(',');
+                    try writeJsonString(writer, entry.key_ptr.*);
+                    try writer.writeByte(':');
+                    try writeValue(writer, entry.value_ptr.*);
+                }
+                try writer.writeByte('}');
+            },
+        }
+    } else if (isContainer(T)) {
+        const Mapper = if (@hasDecl(T, "Mapper")) T.Mapper else izo.Mapper(T, .{});
+        try izo.json.encodeToWriter(writer, value, Mapper, .{});
+    } else {
+        try writeSimpleValue(writer, value);
+    }
+}
+
+/// Helper to encode to string using Writer
+fn encodeToString(allocator: std.mem.Allocator, writer_fn: anytype, args: anytype) ![]u8 {
+    var aw: Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+
+    const result = @call(.auto, writer_fn, .{&aw.writer} ++ args);
+    if (result) {
+        try aw.writer.flush();
+        const out = try allocator.dupe(u8, aw.written());
+        aw.deinit();
+        return out;
+    } else |err| {
+        aw.deinit();
+        return err;
+    }
+}
+
+/// Streaming version: writes JSON-RPC request directly to the writer using only izo/manual JSON.
+pub fn encodeRequestToWriter(
+    writer: *std.Io.Writer,
+    id: jsonrpc.RequestId,
+    method: []const u8,
+    params: anytype,
+) !void {
+    try writer.writeByte('{');
+
+    try writeJsonString(writer, "jsonrpc");
+    try writer.writeByte(':');
+    try writeJsonString(writer, "2.0");
+
+    try writer.writeByte(',');
+    try writeJsonString(writer, "id");
+    try writer.writeByte(':');
+    try writeValue(writer, id);
+
+    try writer.writeByte(',');
+    try writeJsonString(writer, "method");
+    try writer.writeByte(':');
+    try writeJsonString(writer, method);
+
+    if (@TypeOf(params) != @TypeOf(null)) {
+        try writer.writeByte(',');
+        try writeJsonString(writer, "params");
+        try writer.writeByte(':');
+        try writeValue(writer, params);
+    }
+
+    try writer.writeByte('}');
+    try writer.flush();
+}
+
+/// Streaming version: writes JSON-RPC notification directly to the writer using only izo/manual JSON.
+pub fn encodeNotificationToWriter(
+    writer: *std.Io.Writer,
+    method: []const u8,
+    params: anytype,
+) !void {
+    try writer.writeByte('{');
+
+    try writeJsonString(writer, "jsonrpc");
+    try writer.writeByte(':');
+    try writeJsonString(writer, "2.0");
+
+    try writer.writeByte(',');
+    try writeJsonString(writer, "method");
+    try writer.writeByte(':');
+    try writeJsonString(writer, method);
+
+    if (@TypeOf(params) != @TypeOf(null)) {
+        try writer.writeByte(',');
+        try writeJsonString(writer, "params");
+        try writer.writeByte(':');
+        try writeValue(writer, params);
+    }
+
+    try writer.writeByte('}');
+    try writer.flush();
+}
+
+/// Streaming version: writes JSON-RPC response directly to the writer using only izo/manual JSON.
+pub fn encodeResponseToWriter(
+    writer: *std.Io.Writer,
+    id: jsonrpc.RequestId,
+    result: anytype,
+) !void {
+    try writer.writeByte('{');
+
+    try writeJsonString(writer, "jsonrpc");
+    try writer.writeByte(':');
+    try writeJsonString(writer, "2.0");
+
+    try writer.writeByte(',');
+    try writeJsonString(writer, "id");
+    try writer.writeByte(':');
+    try writeValue(writer, id);
+
+    try writer.writeByte(',');
+    try writeJsonString(writer, "result");
+    try writer.writeByte(':');
+    try writeValue(writer, result);
+
+    try writer.writeByte('}');
+    try writer.flush();
+}
+
+/// Streaming version: writes JSON-RPC error response directly to the writer using only izo/manual JSON.
+pub fn encodeErrorToWriter(
+    writer: *std.Io.Writer,
+    id: ?jsonrpc.RequestId,
+    err_data: jsonrpc.ErrorData,
+) !void {
+    try writer.writeByte('{');
+
+    try writeJsonString(writer, "jsonrpc");
+    try writer.writeByte(':');
+    try writeJsonString(writer, "2.0");
+
+    try writer.writeByte(',');
+    try writeJsonString(writer, "id");
+    try writer.writeByte(':');
+    if (id) |req_id| {
+        try writeValue(writer, req_id);
+    } else {
+        try writer.writeAll("null");
+    }
+
+    try writer.writeByte(',');
+    try writeJsonString(writer, "error");
+    try writer.writeByte(':');
+    try writeValue(writer, err_data);
+
+    try writer.writeByte('}');
+    try writer.flush();
+}
+
+// Internal Alloc versions for testing - not exposed publicly
+
+fn encodeRequestAlloc(
     allocator: std.mem.Allocator,
     id: jsonrpc.RequestId,
     method: []const u8,
     params: anytype,
 ) ![]u8 {
-    var aw: Io.Writer.Allocating = .init(allocator);
-    errdefer aw.deinit();
-
-    var jws: json.Stringify = .{ .writer = &aw.writer };
-    try jws.beginObject();
-    try jws.objectField("jsonrpc");
-    try jws.write("2.0");
-    try jws.objectField("id");
-    try writeRequestValue(allocator, &jws, id);
-    try jws.objectField("method");
-    try jws.write(method);
-    if (@TypeOf(params) != @TypeOf(null)) {
-        try jws.objectField("params");
-        try writeRequestParams(allocator, &jws, params);
-    }
-    try jws.endObject();
-
-    try aw.writer.flush();
-    const out = try allocator.dupe(u8, aw.written());
-    aw.deinit();
-    return out;
+    return encodeToString(allocator, encodeRequestToWriter, .{ id, method, params });
 }
 
-pub fn encodeNotificationAlloc(
+fn encodeNotificationAlloc(
     allocator: std.mem.Allocator,
     method: []const u8,
     params: anytype,
 ) ![]u8 {
-    var aw: Io.Writer.Allocating = .init(allocator);
-    errdefer aw.deinit();
-
-    var jws: json.Stringify = .{ .writer = &aw.writer };
-    try jws.beginObject();
-    try jws.objectField("jsonrpc");
-    try jws.write("2.0");
-    try jws.objectField("method");
-    try jws.write(method);
-    if (@TypeOf(params) != @TypeOf(null)) {
-        try jws.objectField("params");
-        try writeRequestParams(allocator, &jws, params);
-    }
-    try jws.endObject();
-
-    try aw.writer.flush();
-    const out = try allocator.dupe(u8, aw.written());
-    aw.deinit();
-    return out;
+    return encodeToString(allocator, encodeNotificationToWriter, .{ method, params });
 }
 
-pub fn encodeResponseAlloc(
+fn encodeResponseAlloc(
     allocator: std.mem.Allocator,
     id: jsonrpc.RequestId,
     result: anytype,
 ) ![]u8 {
-    var aw: Io.Writer.Allocating = .init(allocator);
-    errdefer aw.deinit();
-
-    var jws: json.Stringify = .{ .writer = &aw.writer };
-    try jws.beginObject();
-    try jws.objectField("jsonrpc");
-    try jws.write("2.0");
-    try jws.objectField("id");
-    try writeRequestValue(allocator, &jws, id);
-    try jws.objectField("result");
-    try writeRequestValue(allocator, &jws, result);
-    try jws.endObject();
-
-    try aw.writer.flush();
-    const out = try allocator.dupe(u8, aw.written());
-    aw.deinit();
-    return out;
+    return encodeToString(allocator, encodeResponseToWriter, .{ id, result });
 }
 
-pub fn encodeErrorAlloc(
+fn encodeErrorAlloc(
     allocator: std.mem.Allocator,
     id: ?jsonrpc.RequestId,
     err_data: jsonrpc.ErrorData,
 ) ![]u8 {
-    var aw: Io.Writer.Allocating = .init(allocator);
-    errdefer aw.deinit();
-
-    var jws: json.Stringify = .{ .writer = &aw.writer };
-    try jws.beginObject();
-    try jws.objectField("jsonrpc");
-    try jws.write("2.0");
-    try jws.objectField("id");
-    if (id) |req_id| {
-        try writeRequestValue(allocator, &jws, req_id);
-    } else {
-        try jws.write(null);
-    }
-    try jws.objectField("error");
-    try writeRequestValue(allocator, &jws, err_data);
-    try jws.endObject();
-
-    try aw.writer.flush();
-    const out = try allocator.dupe(u8, aw.written());
-    aw.deinit();
-    return out;
-}
-
-fn writeRequestParams(allocator: std.mem.Allocator, jws: *json.Stringify, params: anytype) !void {
-    const T = @TypeOf(params);
-    if (T == json.Value) {
-        try jws.write(params);
-    } else if (@typeInfo(T) == .optional) {
-        if (params) |p| {
-            try writeRequestParams(allocator, jws, p);
-        } else {
-            try jws.write(null);
-        }
-    } else if (@typeInfo(T) == .@"struct") {
-        // Use izo.json.encode for struct types
-        const Mapper = if (@hasDecl(T, "Mapper")) T.Mapper else izo.Mapper(T, .{});
-        const json_str = try izo.json.encode(allocator, params, Mapper, .{});
-        defer allocator.free(json_str);
-        var parsed = try std.json.parseFromSlice(json.Value, allocator, json_str, .{});
-        defer parsed.deinit();
-        try jws.write(parsed.value);
-    } else {
-        try jws.write(params);
-    }
-}
-
-fn writeRequestValue(allocator: std.mem.Allocator, jws: *json.Stringify, value: anytype) !void {
-    const T = @TypeOf(value);
-    // For struct/enum/union types, use izo.json.encode
-    const is_container = switch (@typeInfo(T)) {
-        .@"struct", .@"enum", .@"union" => true,
-        else => false,
-    };
-    if (is_container) {
-        // Use Mapper if available, otherwise create a default one
-        const Mapper = if (@hasDecl(T, "Mapper")) T.Mapper else izo.Mapper(T, .{});
-        const json_str = try izo.json.encode(allocator, value, Mapper, .{});
-        defer allocator.free(json_str);
-        var parsed = try std.json.parseFromSlice(json.Value, allocator, json_str, .{});
-        defer parsed.deinit();
-        try jws.write(parsed.value);
-    } else {
-        try jws.write(value);
-    }
+    return encodeToString(allocator, encodeErrorToWriter, .{ id, err_data });
 }
 
 test "encode request with number id" {
@@ -222,16 +350,16 @@ test "encode error response with id" {
     const encoded = try encodeErrorAlloc(allocator, id, err_data);
     defer allocator.free(encoded);
 
-    // 验证 JSON-RPC 格式
+    // Verify JSON-RPC format
     try std.testing.expect(std.mem.indexOf(u8, encoded, "\"jsonrpc\":\"2.0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, encoded, "\"id\":100") != null);
     try std.testing.expect(std.mem.indexOf(u8, encoded, "\"error\"") != null);
 
-    // 验证 error 对象字段
+    // Verify error object fields
     try std.testing.expect(std.mem.indexOf(u8, encoded, "\"code\":-32601") != null);
     try std.testing.expect(std.mem.indexOf(u8, encoded, "\"message\":\"Method not found: unknown_method\"") != null);
 
-    // 确保没有双重嵌套
+    // Ensure no double nesting
     try std.testing.expect(std.mem.indexOf(u8, encoded, "\"error\":{\"error\"") == null);
 }
 
@@ -255,7 +383,7 @@ test "encode error with data field" {
     const allocator = std.testing.allocator;
     const id = jsonrpc.RequestId{ .string = "req-abc" };
 
-    // 创建带 data 的 error
+    // Create error with data
     var data_obj = std.json.ObjectMap.init(allocator);
     defer data_obj.deinit();
     try data_obj.put("field", std.json.Value{ .string = "value" });

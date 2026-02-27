@@ -641,16 +641,20 @@ pub const TaskStatus = enum {
     failed,
     cancelled,
 
-    pub fn jsonStringify(self: TaskStatus, jws: *json.Stringify) !void {
-        const s: []const u8 = switch (self) {
-            .queued, .running => "working",
-            .input_required => "input_required",
-            .completed => "completed",
-            .failed => "failed",
-            .cancelled => "cancelled",
-        };
-        try jws.write(s);
-    }
+    pub const Mapper = izo.Mapper(TaskStatus, .{
+        .enum_strategy = .custom,
+        .custom = struct {
+            pub fn serialize(value: TaskStatus) []const u8 {
+                return switch (value) {
+                    .queued, .running => "working",
+                    .input_required => "input_required",
+                    .completed => "completed",
+                    .failed => "failed",
+                    .cancelled => "cancelled",
+                };
+            }
+        }.serialize,
+    });
 };
 
 pub const Task = struct {

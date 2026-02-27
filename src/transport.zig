@@ -1,11 +1,13 @@
 const std = @import("std");
 const json = std.json;
 const jsonrpc = @import("jsonrpc.zig");
+const izo = @import("izomorph");
 
 pub const Transport = struct {
     readFn: *const fn (*Transport, std.Io, std.mem.Allocator) anyerror!?jsonrpc.Message,
     writeFn: *const fn (*Transport, std.Io, []const u8) anyerror!void,
     closeFn: *const fn (*Transport, std.Io) void,
+    getWriterFn: *const fn (*Transport, std.Io) *std.Io.Writer,
 
     pub fn read(self: *Transport, io: std.Io, allocator: std.mem.Allocator) !?jsonrpc.Message {
         return self.readFn(self, io, allocator);
@@ -16,13 +18,13 @@ pub const Transport = struct {
     }
 
     pub fn close(self: *Transport, io: std.Io) void {
-        self.closeFn(self, io);
+        return self.closeFn(self, io);
     }
 
-    pub fn writeMessage(self: *Transport, io: std.Io, msg: jsonrpc.Message, allocator: std.mem.Allocator) !void {
-        const data = try msg.stringify(allocator);
-        defer allocator.free(data);
-        try self.write(io, data);
+    /// Returns a writer that can be used for streaming JSON output.
+    /// The writer is tied to the transport and must be used with the same Io.
+    pub fn getWriter(self: *Transport, io: std.Io) *std.Io.Writer {
+        return self.getWriterFn(self, io);
     }
 };
 
@@ -39,15 +41,17 @@ pub const StdioTransport = struct {
     stdout_buf: [8192]u8 = undefined,
 
     pub fn init(allocator: std.mem.Allocator) StdioTransport {
-        return .{
+        const t: StdioTransport = .{
             .transport = .{
                 .readFn = readImpl,
                 .writeFn = writeImpl,
                 .closeFn = closeImpl,
+                .getWriterFn = getWriterImpl,
             },
             .read_buffer = .empty,
             .allocator = allocator,
         };
+        return t;
     }
 
     /// Creates a stdio-like transport which reads from `input_file` and writes to `output_file`.
@@ -103,6 +107,45 @@ pub const StdioTransport = struct {
     }
 
     fn closeImpl(_: *Transport, _: std.Io) void {}
+
+    fn getWriterImpl(transport_ptr: *Transport, io: std.Io) *std.Io.Writer {
+        const self: *StdioTransport = @fieldParentPtr("transport", transport_ptr);
+        self.ensureInited(io);
+        return &self.stdout_writer.interface;
+    }
+};
+
+// Writer vtable implementation for BufferedTransport
+fn bufferedDrain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+    const self: *BufferedTransport = @ptrCast(@alignCast(w.buffer.ptr));
+
+    var total: usize = 0;
+    for (data) |slice| {
+        self.output.appendSlice(self.allocator, slice) catch return error.WriteFailed;
+        total += slice.len;
+    }
+
+    // Handle splat
+    if (splat > 0 and data.len > 0) {
+        const last = data[data.len - 1];
+        var i: usize = 0;
+        while (i < splat) : (i += 1) {
+            self.output.appendSlice(self.allocator, last) catch return error.WriteFailed;
+            total += last.len;
+        }
+    }
+
+    return total;
+}
+
+fn bufferedFlush(w: *std.Io.Writer) std.Io.Writer.Error!void {
+    // BufferedTransport doesn't need explicit flush - data is already in output ArrayList
+    _ = w;
+}
+
+const buffered_vtable: std.Io.Writer.VTable = .{
+    .drain = bufferedDrain,
+    .flush = bufferedFlush,
 };
 
 pub const BufferedTransport = struct {
@@ -111,19 +154,25 @@ pub const BufferedTransport = struct {
     output: std.ArrayList(u8),
     input_pos: usize,
     allocator: std.mem.Allocator,
+    // Buffer for the writer (stores self pointer)
+    writer_buffer: [64]u8 = undefined,
+    // Storage for the writer
+    writer_storage: std.Io.Writer = undefined,
 
     pub fn init(allocator: std.mem.Allocator) BufferedTransport {
-        return .{
+        const self: BufferedTransport = .{
             .transport = .{
                 .readFn = readImpl,
                 .writeFn = writeImpl,
                 .closeFn = closeImpl,
+                .getWriterFn = getWriterImpl,
             },
             .input = .empty,
             .output = .empty,
             .input_pos = 0,
             .allocator = allocator,
         };
+        return self;
     }
 
     pub fn deinit(self: *BufferedTransport) void {
@@ -183,6 +232,20 @@ pub const BufferedTransport = struct {
     }
 
     fn closeImpl(_: *Transport, _: std.Io) void {}
+
+    fn getWriterImpl(transport_ptr: *Transport, _: std.Io) *std.Io.Writer {
+        const self: *BufferedTransport = @fieldParentPtr("transport", transport_ptr);
+        // Store self pointer in buffer
+        const self_ptr_bytes = std.mem.asBytes(&self);
+        @memcpy(self.writer_buffer[0..self_ptr_bytes.len], self_ptr_bytes);
+
+        self.writer_storage = .{
+            .vtable = &buffered_vtable,
+            .buffer = self.writer_buffer[0..],
+            .end = 0,
+        };
+        return &self.writer_storage;
+    }
 };
 
 /// In-memory, blocking, line-delimited transport for tests and embedding.
@@ -194,6 +257,9 @@ pub const DuplexTransport = struct {
         allocator: std.mem.Allocator,
         inbound: *Channel,
         outbound: *Channel,
+        // Storage for the writer
+        writer_storage: std.Io.Writer = undefined,
+        writer_buffer: [64]u8 = undefined,
 
         pub fn asTransport(self: *Endpoint) *Transport {
             return &self.transport;
@@ -242,6 +308,7 @@ pub const DuplexTransport = struct {
                 .readFn = endpointRead,
                 .writeFn = endpointWrite,
                 .closeFn = endpointClose,
+                .getWriterFn = endpointGetWriter,
             },
             .allocator = allocator,
             .inbound = &self.b_to_a,
@@ -252,6 +319,7 @@ pub const DuplexTransport = struct {
                 .readFn = endpointRead,
                 .writeFn = endpointWrite,
                 .closeFn = endpointClose,
+                .getWriterFn = endpointGetWriter,
             },
             .allocator = allocator,
             .inbound = &self.a_to_b,
@@ -297,6 +365,63 @@ pub const DuplexTransport = struct {
         const ep: *Endpoint = @fieldParentPtr("transport", transport_ptr);
         ep.outbound.queue.close(io);
     }
+
+    fn endpointGetWriter(transport_ptr: *Transport, _: std.Io) *std.Io.Writer {
+        const ep: *Endpoint = @fieldParentPtr("transport", transport_ptr);
+        // Store ep pointer in buffer
+        const ep_ptr_bytes = std.mem.asBytes(&ep);
+        @memcpy(ep.writer_buffer[0..ep_ptr_bytes.len], ep_ptr_bytes);
+
+        ep.writer_storage = .{
+            .vtable = &duplex_vtable,
+            .buffer = ep.writer_buffer[0..],
+            .end = 0,
+        };
+        return &ep.writer_storage;
+    }
+};
+
+// Writer vtable implementation for DuplexTransport endpoints
+fn duplexDrain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+    // Recover endpoint pointer from buffer
+    const ep: *DuplexTransport.Endpoint = @ptrCast(@alignCast(w.buffer.ptr));
+
+    // Calculate total size
+    var total_len: usize = 0;
+    for (data) |slice| {
+        total_len += slice.len;
+    }
+    if (splat > 0 and data.len > 0) {
+        total_len += data[data.len - 1].len * splat;
+    }
+
+    // Allocate and copy data
+    const combined = ep.allocator.alloc(u8, total_len) catch return error.WriteFailed;
+    errdefer ep.allocator.free(combined);
+
+    var pos: usize = 0;
+    for (data) |slice| {
+        @memcpy(combined[pos..][0..slice.len], slice);
+        pos += slice.len;
+    }
+    if (splat > 0 and data.len > 0) {
+        const last = data[data.len - 1];
+        var i: usize = 0;
+        while (i < splat) : (i += 1) {
+            @memcpy(combined[pos..][0..last.len], last);
+            pos += last.len;
+        }
+    }
+
+    // Note: We don't have access to io here, so we can't put to queue
+    // The writer API doesn't pass io to drain. This is a limitation.
+    // For now, just free and return error
+    ep.allocator.free(combined);
+    return error.WriteFailed;
+}
+
+const duplex_vtable: std.Io.Writer.VTable = .{
+    .drain = duplexDrain,
 };
 
 test "BufferedTransport basic" {

@@ -10,13 +10,6 @@ pub const RequestId = union(enum) {
 
     pub const Mapper = izo.Mapper(RequestId, .{ .union_strategy = .bare });
 
-    pub fn jsonStringify(self: RequestId, jws: *json.Stringify) !void {
-        switch (self) {
-            .string => |s| try jws.write(s),
-            .number => |n| try jws.write(n),
-        }
-    }
-
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: json.ParseOptions) !RequestId {
         _ = options;
         const token = try source.next();
@@ -53,9 +46,7 @@ pub const ErrorCode = enum(i32) {
     connection_closed = -32000,
     request_timeout = -32001,
 
-    pub fn jsonStringify(self: ErrorCode, jws: *json.Stringify) !void {
-        try jws.write(@intFromEnum(self));
-    }
+    pub const Mapper = izo.Mapper(ErrorCode, .{ .enum_strategy = .bare });
 };
 
 pub const ErrorData = struct {
@@ -63,18 +54,12 @@ pub const ErrorData = struct {
     message: []const u8,
     data: ?json.Value = null,
 
-    pub fn jsonStringify(self: ErrorData, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("code");
-        try jws.write(@intFromEnum(self.code));
-        try jws.objectField("message");
-        try jws.write(self.message);
-        if (self.data) |d| {
-            try jws.objectField("data");
-            try jws.write(d);
-        }
-        try jws.endObject();
-    }
+    pub const Mapper = izo.Mapper(ErrorData, .{
+        .skip_fields = .{"data"},
+        .add_custom = .{
+            .{ .name = "data", .optional = true },
+        },
+    });
 };
 
 pub const Request = struct {
@@ -83,20 +68,12 @@ pub const Request = struct {
     method: []const u8,
     params: ?json.Value = null,
 
-    pub fn jsonStringify(self: Request, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("jsonrpc");
-        try jws.write(self.jsonrpc);
-        try jws.objectField("id");
-        try self.id.jsonStringify(jws);
-        try jws.objectField("method");
-        try jws.write(self.method);
-        if (self.params) |p| {
-            try jws.objectField("params");
-            try jws.write(p);
-        }
-        try jws.endObject();
-    }
+    pub const Mapper = izo.Mapper(Request, .{
+        .skip_fields = .{"params"},
+        .add_custom = .{
+            .{ .name = "params", .optional = true },
+        },
+    });
 };
 
 pub const Response = struct {
@@ -104,16 +81,7 @@ pub const Response = struct {
     id: RequestId,
     result: json.Value,
 
-    pub fn jsonStringify(self: Response, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("jsonrpc");
-        try jws.write(self.jsonrpc);
-        try jws.objectField("id");
-        try self.id.jsonStringify(jws);
-        try jws.objectField("result");
-        try jws.write(self.result);
-        try jws.endObject();
-    }
+    pub const Mapper = izo.Mapper(Response, .{});
 };
 
 pub const Error = struct {
@@ -121,20 +89,12 @@ pub const Error = struct {
     id: ?RequestId = null,
     @"error": ErrorData,
 
-    pub fn jsonStringify(self: Error, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("jsonrpc");
-        try jws.write(self.jsonrpc);
-        try jws.objectField("id");
-        if (self.id) |id| {
-            try id.jsonStringify(jws);
-        } else {
-            try jws.write(null);
-        }
-        try jws.objectField("error");
-        try self.@"error".jsonStringify(jws);
-        try jws.endObject();
-    }
+    pub const Mapper = izo.Mapper(Error, .{
+        .skip_fields = .{"id"},
+        .add_custom = .{
+            .{ .name = "id", .optional = true },
+        },
+    });
 
     pub fn methodNotFound(id: RequestId, method: []const u8) Error {
         _ = method;
@@ -193,18 +153,12 @@ pub const Notification = struct {
     method: []const u8,
     params: ?json.Value = null,
 
-    pub fn jsonStringify(self: Notification, jws: *json.Stringify) !void {
-        try jws.beginObject();
-        try jws.objectField("jsonrpc");
-        try jws.write(self.jsonrpc);
-        try jws.objectField("method");
-        try jws.write(self.method);
-        if (self.params) |p| {
-            try jws.objectField("params");
-            try jws.write(p);
-        }
-        try jws.endObject();
-    }
+    pub const Mapper = izo.Mapper(Notification, .{
+        .skip_fields = .{"params"},
+        .add_custom = .{
+            .{ .name = "params", .optional = true },
+        },
+    });
 };
 
 pub const Message = union(enum) {
@@ -212,6 +166,8 @@ pub const Message = union(enum) {
     response: Response,
     @"error": Error,
     notification: Notification,
+
+    pub const Mapper = izo.Mapper(Message, .{ .union_strategy = .bare });
 
     pub fn parse(allocator: std.mem.Allocator, input: []const u8) !Message {
         var parsed = try json.parseFromSlice(json.Value, allocator, input, .{});
@@ -433,22 +389,17 @@ pub const Message = union(enum) {
         var aw: std.Io.Writer.Allocating = .init(allocator);
         errdefer aw.deinit();
 
-        var jws: json.Stringify = .{ .writer = &aw.writer };
-        try self.jsonStringify(&jws);
+        try izo.json.encodeToWriter(
+            &aw.writer,
+            self,
+            Message.Mapper,
+            .{},
+        );
 
         try aw.writer.flush();
         const result = try allocator.dupe(u8, aw.written());
         aw.deinit();
         return result;
-    }
-
-    pub fn jsonStringify(self: Message, jws: *json.Stringify) !void {
-        switch (self) {
-            .request => |r| try r.jsonStringify(jws),
-            .response => |r| try r.jsonStringify(jws),
-            .@"error" => |e| try e.jsonStringify(jws),
-            .notification => |n| try n.jsonStringify(jws),
-        }
     }
 };
 

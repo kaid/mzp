@@ -6,7 +6,7 @@
     .dependencies = .{
         .izo = .{
             .url = "https://github.com/kaid/izomorph/archive/refs/heads/trunk.tar.gz",
-            .hash = "izomorph-0.0.0--ctBEldHAQDTHaa2QCR7wIoldFsv98yUboWXEyEVH9Ru",
+            .hash = "izomorph-0.0.0--ctBEhx0AQBBU8BiLLTg7faGPQ7EGqOybz6h2vdJ_GFE",
         },
         .zjema = .{
             .url = "https://github.com/kaid/zjema/archive/refs/heads/trunk.tar.gz",
