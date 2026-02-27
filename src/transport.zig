@@ -260,6 +260,8 @@ pub const DuplexTransport = struct {
         // Storage for the writer
         writer_storage: std.Io.Writer = undefined,
         writer_buffer: [64]u8 = undefined,
+        // Stored io for writer operations
+        io: std.Io = undefined,
 
         pub fn asTransport(self: *Endpoint) *Transport {
             return &self.transport;
@@ -366,11 +368,14 @@ pub const DuplexTransport = struct {
         ep.outbound.queue.close(io);
     }
 
-    fn endpointGetWriter(transport_ptr: *Transport, _: std.Io) *std.Io.Writer {
+    fn endpointGetWriter(transport_ptr: *Transport, io: std.Io) *std.Io.Writer {
         const ep: *Endpoint = @fieldParentPtr("transport", transport_ptr);
-        // Store ep pointer in buffer
-        const ep_ptr_bytes = std.mem.asBytes(&ep);
-        @memcpy(ep.writer_buffer[0..ep_ptr_bytes.len], ep_ptr_bytes);
+        // Store io for later use in drain
+        ep.io = io;
+
+        // Store ep pointer in buffer using a simple cast
+        const ep_ptr: usize = @intFromPtr(ep);
+        std.mem.writeInt(usize, @ptrCast(ep.writer_buffer[0..@sizeOf(usize)]), ep_ptr, .little);
 
         ep.writer_storage = .{
             .vtable = &duplex_vtable,
@@ -384,7 +389,8 @@ pub const DuplexTransport = struct {
 // Writer vtable implementation for DuplexTransport endpoints
 fn duplexDrain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
     // Recover endpoint pointer from buffer
-    const ep: *DuplexTransport.Endpoint = @ptrCast(@alignCast(w.buffer.ptr));
+    const ep_ptr_int = std.mem.readInt(usize, @ptrCast(w.buffer.ptr[0..@sizeOf(usize)]), .little);
+    const ep: *DuplexTransport.Endpoint = @ptrFromInt(ep_ptr_int);
 
     // Calculate total size
     var total_len: usize = 0;
@@ -413,11 +419,13 @@ fn duplexDrain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io
         }
     }
 
-    // Note: We don't have access to io here, so we can't put to queue
-    // The writer API doesn't pass io to drain. This is a limitation.
-    // For now, just free and return error
-    ep.allocator.free(combined);
-    return error.WriteFailed;
+    // Send to queue using stored io
+    ep.outbound.queue.putOne(ep.io, combined) catch |err| switch (err) {
+        error.Canceled => return error.WriteFailed,
+        error.Closed => return error.WriteFailed,
+    };
+
+    return total_len;
 }
 
 const duplex_vtable: std.Io.Writer.VTable = .{
