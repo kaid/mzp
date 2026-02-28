@@ -65,7 +65,7 @@ pub const TasksRequestsCapability = struct {
     tools: ?ToolCall = null,
 
     pub const Mapper = izo.Mapper(TasksRequestsCapability, .{
-        .tools = .{ .omit_null = true, .nested = ToolCall.Mapper },
+        .tools = .{ .omit_null = true, .strategy = .{ .nested = ToolCall.Mapper } },
     });
 };
 
@@ -77,7 +77,7 @@ pub const TasksCapability = struct {
     pub const Mapper = izo.Mapper(TasksCapability, .{
         .list = .{ .omit_null = true },
         .cancel = .{ .omit_null = true },
-        .requests = .{ .omit_null = true, .nested = TasksRequestsCapability.Mapper },
+        .requests = .{ .omit_null = true, .strategy = .{ .nested = TasksRequestsCapability.Mapper } },
     });
 };
 
@@ -95,10 +95,10 @@ pub const ServerCapabilities = struct {
     experimental: ?json.Value = null,
 
     pub const Mapper = izo.Mapper(ServerCapabilities, .{
-        .prompts = .{ .omit_null = true, .nested = PromptsCapability.Mapper },
-        .resources = .{ .omit_null = true, .nested = ResourcesCapability.Mapper },
-        .tools = .{ .omit_null = true, .nested = ToolsCapability.Mapper },
-        .tasks = .{ .omit_null = true, .nested = TasksCapability.Mapper },
+        .prompts = .{ .omit_null = true, .strategy = .{ .nested = PromptsCapability.Mapper } },
+        .resources = .{ .omit_null = true, .strategy = .{ .nested = ResourcesCapability.Mapper } },
+        .tools = .{ .omit_null = true, .strategy = .{ .nested = ToolsCapability.Mapper } },
+        .tasks = .{ .omit_null = true, .strategy = .{ .nested = TasksCapability.Mapper } },
         .logging = .{ .omit_null = true },
         .completions = .{ .omit_null = true },
         .experimental = .{ .omit_null = true },
@@ -124,10 +124,10 @@ pub const ClientCapabilities = struct {
     experimental: ?json.Value = null,
 
     pub const Mapper = izo.Mapper(ClientCapabilities, .{
-        .roots = .{ .omit_null = true, .nested = RootsCapability.Mapper },
+        .roots = .{ .omit_null = true, .strategy = .{ .nested = RootsCapability.Mapper } },
         .sampling = .{ .omit_null = true },
         .elicitation = .{ .omit_null = true },
-        .tasks = .{ .omit_null = true, .nested = TasksCapability.Mapper },
+        .tasks = .{ .omit_null = true, .strategy = .{ .nested = TasksCapability.Mapper } },
         .experimental = .{ .omit_null = true },
     });
 };
@@ -138,8 +138,8 @@ pub const InitializeRequestParams = struct {
     clientInfo: Implementation,
 
     pub const Mapper = izo.Mapper(InitializeRequestParams, .{
-        .capabilities = .{ .nested = ClientCapabilities.Mapper },
-        .clientInfo = .{ .nested = Implementation.Mapper },
+        .capabilities = .{ .strategy = .{ .nested = ClientCapabilities.Mapper } },
+        .clientInfo = .{ .strategy = .{ .nested = Implementation.Mapper } },
     });
 };
 
@@ -150,8 +150,8 @@ pub const InitializeResult = struct {
     instructions: ?[]const u8 = null,
 
     pub const Mapper = izo.Mapper(InitializeResult, .{
-        .capabilities = .{ .nested = ServerCapabilities.Mapper },
-        .serverInfo = .{ .nested = Implementation.Mapper },
+        .capabilities = .{ .strategy = .{ .nested = ServerCapabilities.Mapper } },
+        .serverInfo = .{ .strategy = .{ .nested = Implementation.Mapper } },
         .instructions = .{ .omit_null = true },
     });
 };
@@ -175,7 +175,7 @@ pub const ListRootsResult = struct {
     roots: []const Root,
 
     pub const Mapper = izo.Mapper(ListRootsResult, .{
-        .roots = .{ .element_mapper = Root.Mapper },
+        .roots = .{ .strategy = .{ .element = Root.Mapper } },
     });
 };
 
@@ -237,7 +237,7 @@ pub const ListToolsResult = struct {
     nextCursor: ?[]const u8 = null,
 
     pub const Mapper = izo.Mapper(ListToolsResult, .{
-        .tools = .{ .element_mapper = Tool.Mapper },
+        .tools = .{ .strategy = .{ .element = Tool.Mapper } },
         .nextCursor = .{ .omit_null = true },
     });
 };
@@ -280,7 +280,7 @@ pub const CallToolResult = struct {
     isError: bool = false,
 
     pub const Mapper = izo.Mapper(CallToolResult, .{
-        .content = .{ .element_mapper = ContentBlock.Mapper },
+        .content = .{ .strategy = .{ .element = ContentBlock.Mapper } },
         .isError = .{ .omit_default = true },
     });
 };
@@ -354,7 +354,7 @@ pub const ListResourcesResult = struct {
     nextCursor: ?[]const u8 = null,
 
     pub const Mapper = izo.Mapper(ListResourcesResult, .{
-        .resources = .{ .element_mapper = Resource.Mapper },
+        .resources = .{ .strategy = .{ .element = Resource.Mapper } },
         .nextCursor = .{ .omit_null = true },
     });
 };
@@ -390,7 +390,7 @@ pub const ReadResourceResult = struct {
     contents: []const ResourceContents,
 
     pub const Mapper = izo.Mapper(ReadResourceResult, .{
-        .contents = .{ .element_mapper = ResourceContents.Mapper },
+        .contents = .{ .strategy = .{ .element = ResourceContents.Mapper } },
     });
 };
 
@@ -484,7 +484,7 @@ pub const Prompt = struct {
 
     pub const Mapper = izo.Mapper(Prompt, .{
         .description = .{ .omit_null = true },
-        .arguments = .{ .omit_null = true, .element_mapper = PromptArgument.Mapper },
+        .arguments = .{ .omit_null = true, .strategy = .{ .element = PromptArgument.Mapper } },
     });
 };
 
@@ -493,7 +493,7 @@ pub const ListPromptsResult = struct {
     nextCursor: ?[]const u8 = null,
 
     pub const Mapper = izo.Mapper(ListPromptsResult, .{
-        .prompts = .{ .element_mapper = Prompt.Mapper },
+        .prompts = .{ .strategy = .{ .element = Prompt.Mapper } },
         .nextCursor = .{ .omit_null = true },
     });
 };
@@ -511,7 +511,7 @@ pub const GetPromptResult = struct {
 
     pub const Mapper = izo.Mapper(GetPromptResult, .{
         .description = .{ .omit_null = true },
-        .messages = .{ .element_mapper = PromptMessage.Mapper },
+        .messages = .{ .strategy = .{ .element = PromptMessage.Mapper } },
     });
 };
 
@@ -641,19 +641,31 @@ pub const TaskStatus = enum {
     failed,
     cancelled,
 
+    const TaskStatusSerializer = struct {
+        pub fn serialize(value: TaskStatus) []const u8 {
+            return switch (value) {
+                .queued, .running => "working",
+                .input_required => "input_required",
+                .completed => "completed",
+                .failed => "failed",
+                .cancelled => "cancelled",
+            };
+        }
+    };
+
+    const TaskStatusDeserializer = struct {
+        pub fn deserialize(str: []const u8) !TaskStatus {
+            if (std.mem.eql(u8, str, "working")) return .running;
+            if (std.mem.eql(u8, str, "input_required")) return .input_required;
+            if (std.mem.eql(u8, str, "completed")) return .completed;
+            if (std.mem.eql(u8, str, "failed")) return .failed;
+            if (std.mem.eql(u8, str, "cancelled")) return .cancelled;
+            return error.UnknownVariant;
+        }
+    };
+
     pub const Mapper = izo.Mapper(TaskStatus, .{
-        .enum_strategy = .custom,
-        .custom = struct {
-            pub fn serialize(value: TaskStatus) []const u8 {
-                return switch (value) {
-                    .queued, .running => "working",
-                    .input_required => "input_required",
-                    .completed => "completed",
-                    .failed => "failed",
-                    .cancelled => "cancelled",
-                };
-            }
-        }.serialize,
+        .strategy = .{ .custom = .{ .serializer = TaskStatusSerializer, .deserializer = TaskStatusDeserializer } },
     });
 };
 
@@ -678,7 +690,7 @@ pub const CreateTaskResult = struct {
     task: Task,
 
     pub const Mapper = izo.Mapper(CreateTaskResult, .{
-        .task = .{ .nested = Task.Mapper },
+        .task = .{ .strategy = .{ .nested = Task.Mapper } },
     });
 };
 
@@ -687,7 +699,7 @@ pub const ListTasksResult = struct {
     nextCursor: ?[]const u8 = null,
 
     pub const Mapper = izo.Mapper(ListTasksResult, .{
-        .tasks = .{ .element_mapper = Task.Mapper },
+        .tasks = .{ .strategy = .{ .element = Task.Mapper } },
         .nextCursor = .{ .omit_null = true },
     });
 };

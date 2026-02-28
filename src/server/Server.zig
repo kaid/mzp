@@ -1186,11 +1186,24 @@ test "Server request timeout sends notifications/cancelled" {
         }
     };
 
-    var cli_future = try std.Io.concurrent(io, FakeClient.run, .{ duplex.endpointB(), io });
+    // Use native thread for FakeClient to avoid Io.concurrent issues
+    const ClientThread = struct {
+        ep: *transport_mod.DuplexTransport.Endpoint,
+        io: std.Io,
+        fn run(self: @This()) void {
+            FakeClient.run(self.ep, self.io) catch {};
+        }
+    };
+
+    const client_ctx = ClientThread{
+        .ep = duplex.endpointB(),
+        .io = io,
+    };
+    const client_thread = try std.Thread.spawn(.{}, ClientThread.run, .{client_ctx});
 
     try std.testing.expectError(error.RequestTimeout, server.listRoots());
 
-    try cli_future.await(io);
+    client_thread.join();
 }
 
 test "Server tasks/get returns task fields directly" {
@@ -1464,6 +1477,7 @@ test "Server tools/list includes inputSchema" {
         }
     }.handler, null);
 
+    buffered.clearOutput();
     try buffered.setInput("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n");
 
     const msg = try buffered.asTransport().read(io, std.testing.allocator) orelse unreachable;

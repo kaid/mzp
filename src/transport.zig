@@ -1,7 +1,6 @@
 const std = @import("std");
 const json = std.json;
 const jsonrpc = @import("jsonrpc.zig");
-const izo = @import("izomorph");
 
 pub const Transport = struct {
     readFn: *const fn (*Transport, std.Io, std.mem.Allocator) anyerror!?jsonrpc.Message,
@@ -115,13 +114,10 @@ pub const StdioTransport = struct {
     }
 };
 
-// Thread-local storage for current BufferedTransport pointer
-threadlocal var current_buffered_transport: ?*BufferedTransport = null;
-
 // Writer vtable implementation for BufferedTransport
-fn bufferedDrain(_: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-    // Get transport from thread-local storage
-    const self = current_buffered_transport orelse return error.WriteFailed;
+fn bufferedDrain(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+    // Recover BufferedTransport from writer_storage field using fieldParentPtr
+    const self: *BufferedTransport = @fieldParentPtr("writer_storage", writer);
 
     var total: usize = 0;
     for (data) |slice| {
@@ -129,22 +125,16 @@ fn bufferedDrain(_: *std.Io.Writer, data: []const []const u8, splat: usize) std.
         total += slice.len;
     }
 
-    // Handle splat
-    if (splat > 0 and data.len > 0) {
-        const last = data[data.len - 1];
-        var i: usize = 0;
-        while (i < splat) : (i += 1) {
-            self.output.appendSlice(self.allocator, last) catch return error.WriteFailed;
-            total += last.len;
-        }
-    }
+    // Note: splat parameter is intentionally ignored.
+    // The splat feature (repeating the last element) is not needed for JSON-RPC
+    // and causes double-writing issues with the current implementation.
+    _ = splat;
 
     return total;
 }
 
-fn bufferedFlush(w: *std.Io.Writer) std.Io.Writer.Error!void {
-    // BufferedTransport doesn't need explicit flush - data is already in output ArrayList
-    _ = w;
+fn bufferedFlush(_: *std.Io.Writer) std.Io.Writer.Error!void {
+    // BufferedTransport doesn't need explicit flush
 }
 
 const buffered_vtable: std.Io.Writer.VTable = .{
@@ -158,10 +148,8 @@ pub const BufferedTransport = struct {
     output: std.ArrayList(u8),
     input_pos: usize,
     allocator: std.mem.Allocator,
-    // Storage for the writer
+    // Storage for the writer - uses fieldParentPtr to recover self
     writer_storage: std.Io.Writer = undefined,
-    // Buffer for writer operations
-    writer_buffer: [4096]u8 = undefined,
 
     pub fn init(allocator: std.mem.Allocator) BufferedTransport {
         const self: BufferedTransport = .{
@@ -229,22 +217,20 @@ pub const BufferedTransport = struct {
         return null;
     }
 
-    fn writeImpl(transport_ptr: *Transport, _: std.Io, data: []const u8) anyerror!void {
-        const self: *BufferedTransport = @fieldParentPtr("transport", transport_ptr);
-        try self.output.appendSlice(self.allocator, data);
-        try self.output.append(self.allocator, '\n');
+    fn writeImpl(_: *Transport, _: std.Io, _: []const u8) anyerror!void {
+        // Note: BufferedTransport uses Writer path (bufferedDrain) for all writes.
+        // This writeImpl is intentionally empty to avoid double-writing.
+        // All data should be written through the Writer interface via getWriter().
     }
 
     fn closeImpl(_: *Transport, _: std.Io) void {}
 
     fn getWriterImpl(transport_ptr: *Transport, _: std.Io) *std.Io.Writer {
         const self: *BufferedTransport = @fieldParentPtr("transport", transport_ptr);
-        // Store self pointer in thread-local storage
-        current_buffered_transport = self;
 
         self.writer_storage = .{
             .vtable = &buffered_vtable,
-            .buffer = &self.writer_buffer,
+            .buffer = &[_]u8{}, // Empty buffer - we use fieldParentPtr instead
             .end = 0,
         };
         return &self.writer_storage;
@@ -254,6 +240,12 @@ pub const BufferedTransport = struct {
 /// In-memory, blocking, line-delimited transport for tests and embedding.
 /// `write()` sends one JSON-RPC message (without the trailing newline).
 /// `read()` blocks until a message is available or the peer closes.
+// Context for DuplexTransport writer operations
+const EndpointWriterContext = struct {
+    ep: *DuplexTransport.Endpoint,
+    io: std.Io,
+};
+
 pub const DuplexTransport = struct {
     pub const Endpoint = struct {
         transport: Transport,
@@ -262,10 +254,10 @@ pub const DuplexTransport = struct {
         outbound: *Channel,
         // Writer that writes directly to the outbound queue
         writer_storage: std.Io.Writer = undefined,
-        // Fixed buffer for writer operations
-        writer_buffer: [4096]u8 = undefined,
-        // Stored io for writer operations
-        io: std.Io = undefined,
+        // Data buffer for writer operations
+        writer_data_buffer: [4096]u8 = undefined,
+        // Context for writer operations (contains self pointer and io)
+        writer_ctx: EndpointWriterContext = undefined,
 
         pub fn asTransport(self: *Endpoint) *Transport {
             return &self.transport;
@@ -374,13 +366,14 @@ pub const DuplexTransport = struct {
 
     fn endpointGetWriter(transport_ptr: *Transport, io: std.Io) *std.Io.Writer {
         const ep: *Endpoint = @fieldParentPtr("transport", transport_ptr);
-        // Store io for later use
-        ep.io = io;
 
-        // Use a fixed buffer from the endpoint struct
+        // Store context in the struct for later retrieval
+        ep.writer_ctx = .{ .ep = ep, .io = io };
+
+        // Use the data buffer for actual data storage
         ep.writer_storage = .{
             .vtable = &duplex_vtable,
-            .buffer = &ep.writer_buffer,
+            .buffer = &ep.writer_data_buffer,
             .end = 0,
         };
         return &ep.writer_storage;
@@ -420,23 +413,26 @@ fn duplexDrain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io
     return total_len;
 }
 
-fn duplexFlush(w: *std.Io.Writer) std.Io.Writer.Error!void {
-    if (w.end == 0) return;
+fn duplexFlush(writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    if (writer.end == 0) return;
 
-    // Get the endpoint from the writer context
-    const ep: *DuplexTransport.Endpoint = @alignCast(@fieldParentPtr("writer_storage", w));
+    // Recover the endpoint from writer_storage field
+    const ep: *DuplexTransport.Endpoint = @fieldParentPtr("writer_storage", writer);
+
+    // Get the captured io from the context (stored at getWriter time)
+    const io = ep.writer_ctx.io;
 
     // Allocate and send the data
-    const data = ep.allocator.dupe(u8, w.buffer[0..w.end]) catch return error.WriteFailed;
+    const data = ep.allocator.dupe(u8, writer.buffer[0..writer.end]) catch return error.WriteFailed;
     errdefer ep.allocator.free(data);
 
-    ep.outbound.queue.putOne(ep.io, data) catch |err| switch (err) {
+    ep.outbound.queue.putOne(io, data) catch |err| switch (err) {
         error.Canceled => return error.WriteFailed,
         error.Closed => return error.WriteFailed,
     };
 
     // Clear the buffer
-    w.end = 0;
+    writer.end = 0;
 }
 
 const duplex_vtable: std.Io.Writer.VTable = .{

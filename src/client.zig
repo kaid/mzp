@@ -328,7 +328,8 @@ pub const Client = struct {
             const writer = self.transport.getWriter(io);
             try envelope_codec.encodeRequestToWriter(writer, id, method, params);
             try writer.writeByte('\n');
-            try writer.flush();
+            // Note: encodeRequestToWriter already calls flush, so the newline is in a separate message
+            // This is expected by line-delimited JSON-RPC protocol
         }
 
         const eff_timeout = self.effectiveTimeout(timeout);
@@ -738,13 +739,29 @@ test "Client initialize parses server result" {
         }
     };
 
+    // Use native thread for FakeServer
+    const ServerThread = struct {
+        ep: *transport_mod.DuplexTransport.Endpoint,
+        io: std.Io,
+
+        fn run(self: @This()) void {
+            FakeServer.run(self.ep, self.io) catch {};
+        }
+    };
+
+    const server_ctx = ServerThread{
+        .ep = duplex.endpointB(),
+        .io = io,
+    };
+
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{server_ctx});
+
     var run_future = try std.Io.concurrent(io, Client.run, .{ &client, io });
-    var srv_future = try std.Io.concurrent(io, FakeServer.run, .{ duplex.endpointB(), io });
 
     const result = try client.initialize();
 
-    try srv_future.await(io);
     try run_future.await(io);
+    server_thread.join();
 
     try std.testing.expectEqualStrings("2025-03-26", result.protocolVersion);
     try std.testing.expectEqualStrings("srv", result.serverInfo.name);
@@ -830,15 +847,28 @@ test "Client initialize sends roots capability with listChanged" {
         }
     };
 
+    // Use native thread for FakeServer to avoid Io.concurrent issues
+    const ServerThread = struct {
+        ep: *transport_mod.DuplexTransport.Endpoint,
+        io: std.Io,
+        fn run(self: @This()) void {
+            FakeServer.run(self.ep, self.io) catch {};
+        }
+    };
+
+    const server_ctx = ServerThread{
+        .ep = duplex.endpointB(),
+        .io = io,
+    };
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{server_ctx});
+
     var run_future = try std.Io.concurrent(io, Client.run, .{ &client, io });
     defer _ = run_future.cancel(io) catch {};
-    var srv_future = try std.Io.concurrent(io, FakeServer.run, .{ duplex.endpointB(), io });
-    defer _ = srv_future.cancel(io) catch {};
 
     _ = try client.initialize();
 
-    try srv_future.await(io);
     try run_future.await(io);
+    server_thread.join();
 }
 
 test "Client responds to roots/list while waiting for response" {

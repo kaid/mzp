@@ -11,7 +11,7 @@ pub const RequestId = union(enum) {
     string: []const u8,
     number: i64,
 
-    pub const Mapper = izo.Mapper(RequestId, .{ .union_strategy = .bare });
+    pub const Mapper = izo.Mapper(RequestId, .{ .strategy = .bare });
 
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: json.ParseOptions) !RequestId {
         _ = options;
@@ -52,7 +52,7 @@ pub const ErrorCode = enum(i32) {
     connection_closed = -32000,
     request_timeout = -32001,
 
-    pub const Mapper = izo.Mapper(ErrorCode, .{ .enum_strategy = .bare });
+    pub const Mapper = izo.Mapper(ErrorCode, .{ .strategy = .bare });
 };
 
 // ============================================================================
@@ -121,7 +121,8 @@ pub const Error = struct {
     @"error": ErrorData,
 
     pub const Mapper = izo.Mapper(@This(), .{
-        .id = .{ .omit_null = true },
+        // Note: JSON-RPC spec requires id to be present even when null (for parse errors)
+        // .id field should not be omitted
     });
 
     pub fn methodNotFound(id: RequestId, method: []const u8) Error {
@@ -196,7 +197,7 @@ pub const RawMessage = union(enum) {
     @"error": Error,
     notification: RawNotification,
 
-    pub const Mapper = izo.Mapper(RawMessage, .{ .union_strategy = .bare });
+    pub const Mapper = izo.Mapper(RawMessage, .{ .strategy = .bare });
 
     pub fn parse(allocator: std.mem.Allocator, input: []const u8) !RawMessage {
         var parsed = try json.parseFromSlice(json.Value, allocator, input, .{});

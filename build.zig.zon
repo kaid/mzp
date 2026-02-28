@@ -6,11 +6,11 @@
     .dependencies = .{
         .izo = .{
             .url = "https://github.com/kaid/izomorph/archive/refs/heads/trunk.tar.gz",
-            .hash = "izomorph-0.0.0--ctBEhx0AQBBU8BiLLTg7faGPQ7EGqOybz6h2vdJ_GFE",
+            .hash = "izomorph-0.0.0--ctBEgH-AQBr27b1Bwk7Cu8yaXmfFUnBNZMMWJSrivsC",
         },
         .zjema = .{
             .url = "https://github.com/kaid/zjema/archive/refs/heads/trunk.tar.gz",
-            .hash = "zjema-0.16.0-dev.2637+6a9510c0e-8vMphkaaAQBk3ayR3EnxumXcGp8Sn6UTDaCPBXxokuVM",
+            .hash = "zjema-0.16.0-dev.2637+6a9510c0e-8vMphu6RAQDggDkqkHst0YaPdQFW_vVxR1WsPzAVc5OT",
         },
     },
     .paths = .{
