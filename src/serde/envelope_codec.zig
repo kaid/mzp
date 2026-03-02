@@ -1,7 +1,7 @@
 const std = @import("std");
 const json = std.json;
 const jsonrpc = @import("../jsonrpc.zig");
-const izo = @import("izomorph");
+const zjema_json = @import("zjema").json;
 
 const Io = std.Io;
 
@@ -26,14 +26,14 @@ pub fn encodeRequestToWriter(
             .method = method,
             .params = null,
         };
-        try izo.json.encodeToWriter(writer, req, jsonrpc.RawRequest.Mapper, .{});
+        try zjema_json.encodeToWriter(writer, req, jsonrpc.RawRequest.Mapper, .{});
     } else {
         const req = jsonrpc.TypedRequest(Params){
             .id = id,
             .method = method,
             .params = params,
         };
-        try izo.json.encodeToWriter(writer, req, jsonrpc.TypedRequest(Params).Mapper, .{});
+        try zjema_json.encodeToWriter(writer, req, jsonrpc.TypedRequest(Params).Mapper, .{});
     }
     try writer.flush();
 }
@@ -57,13 +57,13 @@ pub fn encodeNotificationToWriter(
             .method = method,
             .params = null,
         };
-        try izo.json.encodeToWriter(writer, notif, jsonrpc.RawNotification.Mapper, .{});
+        try zjema_json.encodeToWriter(writer, notif, jsonrpc.RawNotification.Mapper, .{});
     } else {
         const notif = jsonrpc.TypedNotification(Params){
             .method = method,
             .params = params,
         };
-        try izo.json.encodeToWriter(writer, notif, jsonrpc.TypedNotification(Params).Mapper, .{});
+        try zjema_json.encodeToWriter(writer, notif, jsonrpc.TypedNotification(Params).Mapper, .{});
     }
     try writer.flush();
 }
@@ -81,7 +81,7 @@ pub fn encodeResponseToWriter(
         .result = result,
     };
 
-    try izo.json.encodeToWriter(writer, resp, jsonrpc.TypedResponse(Result).Mapper, .{});
+    try zjema_json.encodeToWriter(writer, resp, jsonrpc.TypedResponse(Result).Mapper, .{});
     try writer.flush();
 }
 
@@ -96,7 +96,7 @@ pub fn encodeErrorToWriter(
         .@"error" = err_data,
     };
 
-    try izo.json.encodeToWriter(writer, err, jsonrpc.Error.Mapper, .{});
+    try zjema_json.encodeToWriter(writer, err, jsonrpc.Error.Mapper, .{});
     try writer.flush();
 }
 

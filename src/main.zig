@@ -1,11 +1,11 @@
 const std = @import("std");
 const mzp = @import("mzp");
-const izo = @import("izomorph");
+const zjema_json = @import("zjema").json;
 
 const EchoArgs = struct {
     message: []const u8,
 };
-const EchoArgsMapper = izo.Mapper(EchoArgs, .{});
+const EchoArgsMapper = zjema_json.Mapper(EchoArgs, .{});
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;

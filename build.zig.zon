@@ -4,13 +4,9 @@
     .fingerprint = 0x3a9b61211511c8cd, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0-dev.2349+204fa8959",
     .dependencies = .{
-        .izo = .{
-            .url = "https://github.com/kaid/izomorph/archive/refs/heads/trunk.tar.gz",
-            .hash = "izomorph-0.0.0--ctBEgH-AQBr27b1Bwk7Cu8yaXmfFUnBNZMMWJSrivsC",
-        },
         .zjema = .{
             .url = "https://github.com/kaid/zjema/archive/refs/heads/trunk.tar.gz",
-            .hash = "zjema-0.16.0-dev.2637+6a9510c0e-8vMphu6RAQDggDkqkHst0YaPdQFW_vVxR1WsPzAVc5OT",
+            .hash = "zjema-0.16.0-dev.2637+6a9510c0e-8vMphtCSAQC-zLXjy-M2V4YX-57e4iWxYeR6zQQwf6Zi",
         },
     },
     .paths = .{

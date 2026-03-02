@@ -1,6 +1,6 @@
 const std = @import("std");
 const json = std.json;
-const izo = @import("izomorph");
+const zjema_json = @import("zjema").json;
 const jsonrpc = @import("jsonrpc.zig");
 const types = @import("types.zig");
 const transport_mod = @import("transport.zig");
@@ -205,7 +205,7 @@ pub const Client = struct {
         const result_value = try self.requestRaw("initialize", params, null);
         defer jsonrpc.Message.freeValue(self.getAllocator(), result_value);
 
-        // Parse result using std.json directly to avoid memory issues with izomorph
+        // Parse result using std.json directly to avoid memory issues in mapper-based decode
         const result = try parseInitializeResult(self.allocator, result_value);
         self.setServerStateFromInitializeResult(result);
 
@@ -290,7 +290,7 @@ pub const Client = struct {
 
     const CancelParams = struct {
         requestId: jsonrpc.RequestId,
-        pub const Mapper = izo.Mapper(CancelParams, .{});
+        pub const Mapper = zjema_json.Mapper(CancelParams, .{});
     };
 
     fn sendCancelledNotification(self: *Client, id: jsonrpc.RequestId) void {
@@ -531,7 +531,7 @@ const WireInitializeResult = struct {
     instructions: ?[]const u8 = null,
 };
 
-const WireInitializeResultMapper = izo.Mapper(WireInitializeResult, .{});
+const WireInitializeResultMapper = zjema_json.Mapper(WireInitializeResult, .{});
 
 fn wireInitializeToPublic(wire: WireInitializeResult) types.InitializeResult {
     return .{

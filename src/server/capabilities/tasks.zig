@@ -1,6 +1,6 @@
 const std = @import("std");
 const json = std.json;
-const izo = @import("izomorph");
+const zjema_json = @import("zjema").json;
 const jsonrpc = @import("../../jsonrpc.zig");
 const types = @import("../../types.zig");
 const common = @import("../common.zig");
@@ -47,7 +47,7 @@ pub const Capability = struct {
             }
         };
 
-        pub const Mapper = izo.Mapper(JsonValueWrapper, .{
+        pub const Mapper = zjema_json.Mapper(JsonValueWrapper, .{
             .value = .{ .adapter = ValueAdapter },
         });
     };

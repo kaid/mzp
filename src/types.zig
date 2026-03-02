@@ -1,7 +1,7 @@
 const std = @import("std");
 const json = std.json;
 const Io = std.Io;
-const izo = @import("izomorph");
+const zjema_json = @import("zjema").json;
 
 pub const LATEST_PROTOCOL_VERSION = "2025-11-25";
 pub const DEFAULT_NEGOTIATED_VERSION = "2025-03-26";
@@ -12,7 +12,7 @@ pub const Role = enum {
     user,
     assistant,
 
-    pub const Mapper = izo.Mapper(Role, .{});
+    pub const Mapper = zjema_json.Mapper(Role, .{});
 };
 
 pub const Implementation = struct {
@@ -21,7 +21,7 @@ pub const Implementation = struct {
     title: ?[]const u8 = null,
     description: ?[]const u8 = null,
 
-    pub const Mapper = izo.Mapper(Implementation, .{
+    pub const Mapper = zjema_json.Mapper(Implementation, .{
         .title = .{ .omit_null = true },
         .description = .{ .omit_null = true },
     });
@@ -30,7 +30,7 @@ pub const Implementation = struct {
 pub const PromptsCapability = struct {
     list_changed: bool = false,
 
-    pub const Mapper = izo.Mapper(PromptsCapability, .{
+    pub const Mapper = zjema_json.Mapper(PromptsCapability, .{
         .list_changed = .{ .alias = "listChanged", .omit_default = true },
     });
 };
@@ -39,7 +39,7 @@ pub const ResourcesCapability = struct {
     subscribe: bool = false,
     list_changed: bool = false,
 
-    pub const Mapper = izo.Mapper(ResourcesCapability, .{
+    pub const Mapper = zjema_json.Mapper(ResourcesCapability, .{
         .subscribe = .{ .omit_default = true },
         .list_changed = .{ .alias = "listChanged", .omit_default = true },
     });
@@ -48,7 +48,7 @@ pub const ResourcesCapability = struct {
 pub const ToolsCapability = struct {
     list_changed: bool = false,
 
-    pub const Mapper = izo.Mapper(ToolsCapability, .{
+    pub const Mapper = zjema_json.Mapper(ToolsCapability, .{
         .list_changed = .{ .alias = "listChanged", .omit_default = true },
     });
 };
@@ -57,14 +57,14 @@ pub const TasksRequestsCapability = struct {
     pub const ToolCall = struct {
         call: ?struct {} = null,
 
-        pub const Mapper = izo.Mapper(ToolCall, .{
+        pub const Mapper = zjema_json.Mapper(ToolCall, .{
             .call = .{ .omit_null = true },
         });
     };
 
     tools: ?ToolCall = null,
 
-    pub const Mapper = izo.Mapper(TasksRequestsCapability, .{
+    pub const Mapper = zjema_json.Mapper(TasksRequestsCapability, .{
         .tools = .{ .omit_null = true, .strategy = .{ .nested = ToolCall.Mapper } },
     });
 };
@@ -74,7 +74,7 @@ pub const TasksCapability = struct {
     cancel: ?struct {} = null,
     requests: ?TasksRequestsCapability = null,
 
-    pub const Mapper = izo.Mapper(TasksCapability, .{
+    pub const Mapper = zjema_json.Mapper(TasksCapability, .{
         .list = .{ .omit_null = true },
         .cancel = .{ .omit_null = true },
         .requests = .{ .omit_null = true, .strategy = .{ .nested = TasksRequestsCapability.Mapper } },
@@ -94,7 +94,7 @@ pub const ServerCapabilities = struct {
     completions: ?CompletionsCapability = null,
     experimental: ?json.Value = null,
 
-    pub const Mapper = izo.Mapper(ServerCapabilities, .{
+    pub const Mapper = zjema_json.Mapper(ServerCapabilities, .{
         .prompts = .{ .omit_null = true, .strategy = .{ .nested = PromptsCapability.Mapper } },
         .resources = .{ .omit_null = true, .strategy = .{ .nested = ResourcesCapability.Mapper } },
         .tools = .{ .omit_null = true, .strategy = .{ .nested = ToolsCapability.Mapper } },
@@ -108,7 +108,7 @@ pub const ServerCapabilities = struct {
 pub const RootsCapability = struct {
     list_changed: bool = false,
 
-    pub const Mapper = izo.Mapper(RootsCapability, .{
+    pub const Mapper = zjema_json.Mapper(RootsCapability, .{
         .list_changed = .{ .alias = "listChanged", .omit_default = true },
     });
 };
@@ -123,7 +123,7 @@ pub const ClientCapabilities = struct {
     tasks: ?TasksCapability = null,
     experimental: ?json.Value = null,
 
-    pub const Mapper = izo.Mapper(ClientCapabilities, .{
+    pub const Mapper = zjema_json.Mapper(ClientCapabilities, .{
         .roots = .{ .omit_null = true, .strategy = .{ .nested = RootsCapability.Mapper } },
         .sampling = .{ .omit_null = true },
         .elicitation = .{ .omit_null = true },
@@ -137,7 +137,7 @@ pub const InitializeRequestParams = struct {
     capabilities: ClientCapabilities,
     clientInfo: Implementation,
 
-    pub const Mapper = izo.Mapper(InitializeRequestParams, .{
+    pub const Mapper = zjema_json.Mapper(InitializeRequestParams, .{
         .capabilities = .{ .strategy = .{ .nested = ClientCapabilities.Mapper } },
         .clientInfo = .{ .strategy = .{ .nested = Implementation.Mapper } },
     });
@@ -149,7 +149,7 @@ pub const InitializeResult = struct {
     serverInfo: Implementation,
     instructions: ?[]const u8 = null,
 
-    pub const Mapper = izo.Mapper(InitializeResult, .{
+    pub const Mapper = zjema_json.Mapper(InitializeResult, .{
         .capabilities = .{ .strategy = .{ .nested = ServerCapabilities.Mapper } },
         .serverInfo = .{ .strategy = .{ .nested = Implementation.Mapper } },
         .instructions = .{ .omit_null = true },
@@ -160,7 +160,7 @@ pub const Root = struct {
     uri: []const u8,
     name: ?[]const u8 = null,
 
-    pub const Mapper = izo.Mapper(Root, .{
+    pub const Mapper = zjema_json.Mapper(Root, .{
         .name = .{ .omit_null = true },
     });
 };
@@ -174,7 +174,7 @@ pub fn freeRoot(allocator: std.mem.Allocator, root: Root) void {
 pub const ListRootsResult = struct {
     roots: []const Root,
 
-    pub const Mapper = izo.Mapper(ListRootsResult, .{
+    pub const Mapper = zjema_json.Mapper(ListRootsResult, .{
         .roots = .{ .strategy = .{ .element = Root.Mapper } },
     });
 };
@@ -223,7 +223,7 @@ pub const Tool = struct {
     description: ?[]const u8 = null,
     inputSchema: schema.JsonSchema,
 
-    pub const Mapper = izo.Mapper(Tool, .{
+    pub const Mapper = zjema_json.Mapper(Tool, .{
         .description = .{ .omit_null = true },
     });
 
@@ -236,7 +236,7 @@ pub const ListToolsResult = struct {
     tools: []const Tool,
     nextCursor: ?[]const u8 = null,
 
-    pub const Mapper = izo.Mapper(ListToolsResult, .{
+    pub const Mapper = zjema_json.Mapper(ListToolsResult, .{
         .tools = .{ .strategy = .{ .element = Tool.Mapper } },
         .nextCursor = .{ .omit_null = true },
     });
@@ -248,9 +248,9 @@ pub fn stringifyJsonAlloc(allocator: std.mem.Allocator, value: anytype) ![]u8 {
     if (T == json.Value) {
         return try std.json.Stringify.valueAlloc(allocator, value, .{});
     }
-    // For other types, use izo.json.encode
-    const Mapper = comptime izo.Mapper(T, .{});
-    return @constCast(try izo.json.encode(allocator, value, Mapper, .{}));
+    // For other types, use zjema json encode
+    const Mapper = comptime zjema_json.Mapper(T, .{});
+    return @constCast(try zjema_json.encode(allocator, value, Mapper, .{}));
 }
 
 pub const TextContent = struct {
@@ -258,7 +258,7 @@ pub const TextContent = struct {
     text: []const u8,
 };
 
-pub const TextContentMapper = izo.Mapper(TextContent, .{});
+pub const TextContentMapper = zjema_json.Mapper(TextContent, .{});
 
 pub const ImageContent = struct {
     type: []const u8 = "image",
@@ -266,20 +266,20 @@ pub const ImageContent = struct {
     mimeType: []const u8,
 };
 
-pub const ImageContentMapper = izo.Mapper(ImageContent, .{});
+pub const ImageContentMapper = zjema_json.Mapper(ImageContent, .{});
 
 pub const ContentBlock = union(enum) {
     text: TextContent,
     image: ImageContent,
 
-    pub const Mapper = izo.Mapper(ContentBlock, .{});
+    pub const Mapper = zjema_json.Mapper(ContentBlock, .{});
 };
 
 pub const CallToolResult = struct {
     content: []const ContentBlock,
     isError: bool = false,
 
-    pub const Mapper = izo.Mapper(CallToolResult, .{
+    pub const Mapper = zjema_json.Mapper(CallToolResult, .{
         .content = .{ .strategy = .{ .element = ContentBlock.Mapper } },
         .isError = .{ .omit_default = true },
     });
@@ -343,7 +343,7 @@ pub const Resource = struct {
     description: ?[]const u8 = null,
     mimeType: ?[]const u8 = null,
 
-    pub const Mapper = izo.Mapper(Resource, .{
+    pub const Mapper = zjema_json.Mapper(Resource, .{
         .description = .{ .omit_null = true },
         .mimeType = .{ .omit_null = true },
     });
@@ -353,7 +353,7 @@ pub const ListResourcesResult = struct {
     resources: []const Resource,
     nextCursor: ?[]const u8 = null,
 
-    pub const Mapper = izo.Mapper(ListResourcesResult, .{
+    pub const Mapper = zjema_json.Mapper(ListResourcesResult, .{
         .resources = .{ .strategy = .{ .element = Resource.Mapper } },
         .nextCursor = .{ .omit_null = true },
     });
@@ -364,7 +364,7 @@ pub const TextResourceContents = struct {
     mimeType: ?[]const u8 = null,
     text: []const u8,
 
-    pub const Mapper = izo.Mapper(TextResourceContents, .{
+    pub const Mapper = zjema_json.Mapper(TextResourceContents, .{
         .mimeType = .{ .omit_null = true },
     });
 };
@@ -374,7 +374,7 @@ pub const BlobResourceContents = struct {
     mimeType: ?[]const u8 = null,
     blob: []const u8,
 
-    pub const Mapper = izo.Mapper(BlobResourceContents, .{
+    pub const Mapper = zjema_json.Mapper(BlobResourceContents, .{
         .mimeType = .{ .omit_null = true },
     });
 };
@@ -383,13 +383,13 @@ pub const ResourceContents = union(enum) {
     text: TextResourceContents,
     blob: BlobResourceContents,
 
-    pub const Mapper = izo.Mapper(ResourceContents, .{});
+    pub const Mapper = zjema_json.Mapper(ResourceContents, .{});
 };
 
 pub const ReadResourceResult = struct {
     contents: []const ResourceContents,
 
-    pub const Mapper = izo.Mapper(ReadResourceResult, .{
+    pub const Mapper = zjema_json.Mapper(ReadResourceResult, .{
         .contents = .{ .strategy = .{ .element = ResourceContents.Mapper } },
     });
 };
@@ -471,7 +471,7 @@ pub const PromptArgument = struct {
     description: ?[]const u8 = null,
     required: bool = false,
 
-    pub const Mapper = izo.Mapper(PromptArgument, .{
+    pub const Mapper = zjema_json.Mapper(PromptArgument, .{
         .description = .{ .omit_null = true },
         .required = .{ .omit_default = true },
     });
@@ -482,7 +482,7 @@ pub const Prompt = struct {
     description: ?[]const u8 = null,
     arguments: ?[]const PromptArgument = null,
 
-    pub const Mapper = izo.Mapper(Prompt, .{
+    pub const Mapper = zjema_json.Mapper(Prompt, .{
         .description = .{ .omit_null = true },
         .arguments = .{ .omit_null = true, .strategy = .{ .element = PromptArgument.Mapper } },
     });
@@ -492,7 +492,7 @@ pub const ListPromptsResult = struct {
     prompts: []const Prompt,
     nextCursor: ?[]const u8 = null,
 
-    pub const Mapper = izo.Mapper(ListPromptsResult, .{
+    pub const Mapper = zjema_json.Mapper(ListPromptsResult, .{
         .prompts = .{ .strategy = .{ .element = Prompt.Mapper } },
         .nextCursor = .{ .omit_null = true },
     });
@@ -502,14 +502,14 @@ pub const PromptMessage = struct {
     role: Role,
     content: ContentBlock,
 
-    pub const Mapper = izo.Mapper(PromptMessage, .{});
+    pub const Mapper = zjema_json.Mapper(PromptMessage, .{});
 };
 
 pub const GetPromptResult = struct {
     description: ?[]const u8 = null,
     messages: []const PromptMessage,
 
-    pub const Mapper = izo.Mapper(GetPromptResult, .{
+    pub const Mapper = zjema_json.Mapper(GetPromptResult, .{
         .description = .{ .omit_null = true },
         .messages = .{ .strategy = .{ .element = PromptMessage.Mapper } },
     });
@@ -582,25 +582,25 @@ pub const LoggingLevel = enum {
     alert,
     emergency,
 
-    pub const Mapper = izo.Mapper(LoggingLevel, .{});
+    pub const Mapper = zjema_json.Mapper(LoggingLevel, .{});
 };
 
 pub const LoggingSetLevelParams = struct {
     level: LoggingLevel,
 
-    pub const Mapper = izo.Mapper(LoggingSetLevelParams, .{});
+    pub const Mapper = zjema_json.Mapper(LoggingSetLevelParams, .{});
 };
 
 pub const EmptyResult = struct {};
 
-pub const EmptyResultMapper = izo.Mapper(EmptyResult, .{});
+pub const EmptyResultMapper = zjema_json.Mapper(EmptyResult, .{});
 
 pub const LoggingMessageParams = struct {
     level: LoggingLevel,
     logger: ?[]const u8 = null,
     data: json.Value,
 
-    pub const Mapper = izo.Mapper(LoggingMessageParams, .{
+    pub const Mapper = zjema_json.Mapper(LoggingMessageParams, .{
         .logger = .{ .omit_null = true },
     });
 };
@@ -627,7 +627,7 @@ pub const ProgressParams = struct {
     total: ?f64 = null,
     message: ?[]const u8 = null,
 
-    pub const Mapper = izo.Mapper(ProgressParams, .{
+    pub const Mapper = zjema_json.Mapper(ProgressParams, .{
         .total = .{ .omit_null = true },
         .message = .{ .omit_null = true },
     });
@@ -664,7 +664,7 @@ pub const TaskStatus = enum {
         }
     };
 
-    pub const Mapper = izo.Mapper(TaskStatus, .{
+    pub const Mapper = zjema_json.Mapper(TaskStatus, .{
         .strategy = .{ .custom = .{ .serializer = TaskStatusSerializer, .deserializer = TaskStatusDeserializer } },
     });
 };
@@ -678,7 +678,7 @@ pub const Task = struct {
     ttl: ?u64 = null,
     pollInterval: ?u64 = null,
 
-    pub const Mapper = izo.Mapper(Task, .{
+    pub const Mapper = zjema_json.Mapper(Task, .{
         .id = .{ .alias = "taskId" },
         .updatedAt = .{ .alias = "lastUpdatedAt" },
         .statusMessage = .{ .omit_null = true },
@@ -689,7 +689,7 @@ pub const Task = struct {
 pub const CreateTaskResult = struct {
     task: Task,
 
-    pub const Mapper = izo.Mapper(CreateTaskResult, .{
+    pub const Mapper = zjema_json.Mapper(CreateTaskResult, .{
         .task = .{ .strategy = .{ .nested = Task.Mapper } },
     });
 };
@@ -698,7 +698,7 @@ pub const ListTasksResult = struct {
     tasks: []const Task,
     nextCursor: ?[]const u8 = null,
 
-    pub const Mapper = izo.Mapper(ListTasksResult, .{
+    pub const Mapper = zjema_json.Mapper(ListTasksResult, .{
         .tasks = .{ .strategy = .{ .element = Task.Mapper } },
         .nextCursor = .{ .omit_null = true },
     });
@@ -710,7 +710,7 @@ test "ServerCapabilities stringify" {
         .resources = ResourcesCapability{ .subscribe = true },
     };
 
-    const json_str = try izo.json.encode(std.testing.allocator, caps, ServerCapabilities.Mapper, .{});
+    const json_str = try zjema_json.encode(std.testing.allocator, caps, ServerCapabilities.Mapper, .{});
     defer std.testing.allocator.free(json_str);
     try std.testing.expect(json_str.len > 0);
 }
@@ -724,7 +724,7 @@ test "TasksCapability stringify uses nested objects" {
         },
     };
 
-    const json_str = try izo.json.encode(std.testing.allocator, caps, ServerCapabilities.Mapper, .{});
+    const json_str = try zjema_json.encode(std.testing.allocator, caps, ServerCapabilities.Mapper, .{});
     defer std.testing.allocator.free(json_str);
 
     try std.testing.expect(std.mem.indexOf(u8, json_str, "\"tasks\"") != null);
@@ -745,7 +745,7 @@ test "Task stringify uses taskId/lastUpdatedAt and includes ttl" {
         .pollInterval = 500,
     };
 
-    const json_str = try izo.json.encode(std.testing.allocator, task, Task.Mapper, .{});
+    const json_str = try zjema_json.encode(std.testing.allocator, task, Task.Mapper, .{});
     defer std.testing.allocator.free(json_str);
 
     try std.testing.expect(std.mem.indexOf(u8, json_str, "\"taskId\"") != null);
@@ -765,7 +765,7 @@ test "Task stringify omits pollInterval when null" {
         .pollInterval = null,
     };
 
-    const json_str = try izo.json.encode(std.testing.allocator, task, Task.Mapper, .{});
+    const json_str = try zjema_json.encode(std.testing.allocator, task, Task.Mapper, .{});
     defer std.testing.allocator.free(json_str);
 
     try std.testing.expect(std.mem.indexOf(u8, json_str, "\"pollInterval\"") == null);

@@ -1,10 +1,10 @@
 const std = @import("std");
 const json = std.json;
-const izo = @import("izomorph");
+const zjema_json = @import("zjema").json;
 const types = @import("../types.zig");
 
 pub fn defaultMapper(comptime T: type) type {
-    return izo.Mapper(T, .{});
+    return zjema_json.Mapper(T, .{});
 }
 
 pub fn encodeTyped(
@@ -12,7 +12,7 @@ pub fn encodeTyped(
     value: anytype,
     comptime Mapper: type,
 ) ![]u8 {
-    return @constCast(try izo.json.encode(allocator, value, Mapper, .{}));
+    return @constCast(try zjema_json.encode(allocator, value, Mapper, .{}));
 }
 
 pub fn encodeTypedDefault(
@@ -28,8 +28,8 @@ pub fn decodeTyped(
     comptime Mapper: type,
     input: []const u8,
 ) !Mapper.TargetType {
-    // Use izomorph decode which respects Mapper configuration (aliases, etc.)
-    return try izo.json.decode(allocator, Mapper, input);
+    // Use mapper-aware decode which respects Mapper configuration (aliases, etc.)
+    return try zjema_json.decode(allocator, Mapper, input, .{});
 }
 
 pub fn decodeTypedDefault(

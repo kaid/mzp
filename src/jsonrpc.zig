@@ -1,6 +1,6 @@
 const std = @import("std");
 const json = std.json;
-const izo = @import("izomorph");
+const zjema_json = @import("zjema").json;
 
 pub const JSONRPC_VERSION = "2.0";
 
@@ -11,7 +11,7 @@ pub const RequestId = union(enum) {
     string: []const u8,
     number: i64,
 
-    pub const Mapper = izo.Mapper(RequestId, .{ .strategy = .bare });
+    pub const Mapper = zjema_json.Mapper(RequestId, .{ .strategy = .bare });
 
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: json.ParseOptions) !RequestId {
         _ = options;
@@ -52,7 +52,7 @@ pub const ErrorCode = enum(i32) {
     connection_closed = -32000,
     request_timeout = -32001,
 
-    pub const Mapper = izo.Mapper(ErrorCode, .{ .strategy = .bare });
+    pub const Mapper = zjema_json.Mapper(ErrorCode, .{ .strategy = .bare });
 };
 
 // ============================================================================
@@ -63,7 +63,7 @@ pub const ErrorData = struct {
     message: []const u8,
     data: ?json.Value = null,
 
-    pub const Mapper = izo.Mapper(ErrorData, .{
+    pub const Mapper = zjema_json.Mapper(ErrorData, .{
         .data = .{ .omit_null = true },
     });
 };
@@ -81,7 +81,7 @@ pub fn TypedRequest(comptime Params: type) type {
         method: []const u8,
         params: ?Params = null,
 
-        pub const Mapper = izo.Mapper(@This(), .{
+        pub const Mapper = zjema_json.Mapper(@This(), .{
             .params = .{ .omit_null = true },
         });
     };
@@ -95,7 +95,7 @@ pub fn TypedNotification(comptime Params: type) type {
         method: []const u8,
         params: ?Params = null,
 
-        pub const Mapper = izo.Mapper(@This(), .{
+        pub const Mapper = zjema_json.Mapper(@This(), .{
             .params = .{ .omit_null = true },
         });
     };
@@ -109,7 +109,7 @@ pub fn TypedResponse(comptime Result: type) type {
         id: RequestId,
         result: Result,
 
-        pub const Mapper = izo.Mapper(@This(), .{});
+        pub const Mapper = zjema_json.Mapper(@This(), .{});
     };
 }
 
@@ -120,7 +120,7 @@ pub const Error = struct {
     id: ?RequestId = null,
     @"error": ErrorData,
 
-    pub const Mapper = izo.Mapper(@This(), .{
+    pub const Mapper = zjema_json.Mapper(@This(), .{
         // Note: JSON-RPC spec requires id to be present even when null (for parse errors)
         // .id field should not be omitted
     });
@@ -197,7 +197,7 @@ pub const RawMessage = union(enum) {
     @"error": Error,
     notification: RawNotification,
 
-    pub const Mapper = izo.Mapper(RawMessage, .{ .strategy = .bare });
+    pub const Mapper = zjema_json.Mapper(RawMessage, .{ .strategy = .bare });
 
     pub fn parse(allocator: std.mem.Allocator, input: []const u8) !RawMessage {
         var parsed = try json.parseFromSlice(json.Value, allocator, input, .{});
@@ -419,7 +419,7 @@ pub const RawMessage = union(enum) {
         var aw: std.Io.Writer.Allocating = .init(allocator);
         errdefer aw.deinit();
 
-        try izo.json.encodeToWriter(
+        try zjema_json.encodeToWriter(
             &aw.writer,
             self,
             RawMessage.Mapper,
@@ -500,7 +500,7 @@ test "typed request serialization" {
     var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer aw.deinit();
 
-    try izo.json.encodeToWriter(&aw.writer, req, TypedRequest(TestParams).Mapper, .{});
+    try zjema_json.encodeToWriter(&aw.writer, req, TypedRequest(TestParams).Mapper, .{});
     try aw.writer.flush();
 
     const json_str = aw.written();

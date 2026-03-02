@@ -1,6 +1,6 @@
 const std = @import("std");
 const json = std.json;
-const izo = @import("izomorph");
+const zjema_json = @import("zjema").json;
 const jsonrpc = @import("../jsonrpc.zig");
 const types = @import("../types.zig");
 const transport_mod = @import("../transport.zig");
@@ -523,7 +523,7 @@ pub const Server = struct {
 
     const CancelParams = struct {
         requestId: jsonrpc.RequestId,
-        pub const Mapper = izo.Mapper(CancelParams, .{});
+        pub const Mapper = zjema_json.Mapper(CancelParams, .{});
     };
 
     fn sendCancelledNotification(self: *Server, id: jsonrpc.RequestId) void {

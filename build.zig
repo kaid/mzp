@@ -3,13 +3,11 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const izo_dep = b.dependency("izo", .{});
     const zjema_dep = b.dependency("zjema", .{});
     const mod = b.addModule("mzp", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .imports = &.{
-            .{ .name = "izomorph", .module = izo_dep.module("izomorph") },
             .{ .name = "zjema", .module = zjema_dep.module("zjema") },
         },
     });
@@ -19,7 +17,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    exe_mod.addImport("izomorph", izo_dep.module("izomorph"));
     exe_mod.addImport("zjema", zjema_dep.module("zjema"));
     exe_mod.addImport("mzp", mod);
 
