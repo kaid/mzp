@@ -854,6 +854,7 @@ test "Server tool handler with user_data" {
             return result;
         }
     }.handler, &ctx);
+    server.initialization_state = .initialized;
 
     try buffered.setInput("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"echo\",\"task\":{}}}\n");
 
@@ -902,6 +903,7 @@ test "Server tools/call runs synchronously when params.task is absent" {
             return result;
         }
     }.handler, &saw);
+    server.initialization_state = .initialized;
 
     try buffered.setInput("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"echo\"}}\n");
 
@@ -961,6 +963,7 @@ test "Server tool handler receives tools/call _meta.progressToken" {
             return result;
         }
     }.handler, &saw);
+    server.initialization_state = .initialized;
 
     try buffered.setInput(
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"echo\",\"task\":{},\"_meta\":{\"progressToken\":\"tok\"}}}\n",
@@ -1256,6 +1259,7 @@ test "Server tasks/get returns task fields directly" {
     server.capabilities.tasks.setIo(io);
 
     _ = try server.capabilities.tasks.createTask(.{ .ttl = 60000, .pollInterval = null });
+    server.initialization_state = .initialized;
 
     try buffered.setInput("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tasks/get\",\"params\":{\"taskId\":\"task-1\"}}\n");
     const msg = try buffered.asTransport().read(io, std.testing.allocator) orelse unreachable;
@@ -1447,6 +1451,7 @@ test "Server logging/setLevel updates min log level" {
     );
     defer server.deinit();
     server.io = io;
+    server.initialization_state = .initialized;
 
     try buffered.setInput("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"logging/setLevel\",\"params\":{\"level\":\"warning\"}}\n");
     const msg = try buffered.asTransport().read(io, std.testing.allocator) orelse unreachable;
@@ -1559,6 +1564,7 @@ test "Server tools/list includes inputSchema" {
             return result;
         }
     }.handler, null);
+    server.initialization_state = .initialized;
 
     buffered.clearOutput();
     try buffered.setInput("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n");
