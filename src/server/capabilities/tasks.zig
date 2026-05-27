@@ -540,16 +540,16 @@ pub const Capability = struct {
         if (value == .object) {
             var obj_map = value.object;
 
-            var related = json.ObjectMap.init(a);
-            try related.put("taskId", .{ .string = task_id.? });
+            var related = try json.ObjectMap.init(a, &.{}, &.{});
+            try related.put(a, "taskId", .{ .string = task_id.? });
 
             var meta_obj = if (obj_map.get("_meta")) |mv| switch (mv) {
                 .object => |o| o,
-                else => json.ObjectMap.init(a),
-            } else json.ObjectMap.init(a);
+                else => try json.ObjectMap.init(a, &.{}, &.{}),
+            } else try json.ObjectMap.init(a, &.{}, &.{});
 
-            try meta_obj.put("io.modelcontextprotocol/related-task", .{ .object = related });
-            try obj_map.put("_meta", .{ .object = meta_obj });
+            try meta_obj.put(a, "io.modelcontextprotocol/related-task", .{ .object = related });
+            try obj_map.put(a, "_meta", .{ .object = meta_obj });
 
             value = .{ .object = obj_map };
         }

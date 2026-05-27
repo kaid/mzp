@@ -88,8 +88,6 @@ pub const Server = struct {
     on_notification: ?NotificationHandler = null,
     min_log_level: std.atomic.Value(u8),
 
-    ts_allocator: std.heap.ThreadSafeAllocator = undefined,
-    ts_allocator_inited: bool = false,
     io: ?std.Io = null,
     io_mutex: std.Io.Mutex = .init,
 
@@ -140,11 +138,7 @@ pub const Server = struct {
     }
 
     pub fn getAllocator(self: *Server) std.mem.Allocator {
-        if (!self.ts_allocator_inited) {
-            // Return the raw allocator if ThreadSafeAllocator is not initialized yet
-            return self.allocator;
-        }
-        return (&self.ts_allocator).allocator();
+        return self.allocator;
     }
 
     fn attachCapabilities(self: *Server) void {
@@ -169,10 +163,6 @@ pub const Server = struct {
         self.capabilities.tasks.setIo(io);
 
         self.io = io;
-        if (!self.ts_allocator_inited) {
-            self.ts_allocator = .{ .child_allocator = self.allocator, .io = io };
-            self.ts_allocator_inited = true;
-        }
         if (!self.pending_inited) {
             self.pending = pending_mod.PendingRegistry.init(self.getAllocator());
             self.pending_inited = true;
@@ -331,6 +321,7 @@ pub const Server = struct {
 
     pub fn handleMessage(self: *Server, io: std.Io, msg: jsonrpc.Message) !void {
         self.attachCapabilities();
+
         switch (msg) {
             .request => |req| try self.handleRequest(req),
             .notification => |notif| try self.handleNotification(io, notif),
@@ -342,6 +333,18 @@ pub const Server = struct {
     fn handleRequest(self: *Server, req: jsonrpc.Request) !void {
         if (std.mem.eql(u8, req.method, "initialize")) {
             try self.handleInitialize(req);
+            return;
+        }
+
+        if (self.initialization_state != .initialized and !std.mem.eql(u8, req.method, "ping")) {
+            try self.sendError(.{
+                .id = req.id,
+                .@"error" = .{
+                    .code = .invalid_request,
+                    .message = "Server not initialized",
+                },
+            });
+            return;
         } else if (std.mem.eql(u8, req.method, "ping")) {
             try self.handlePing(req);
         } else if (std.mem.eql(u8, req.method, "logging/setLevel")) {
@@ -374,78 +377,101 @@ pub const Server = struct {
     }
 
     fn handleInitialize(self: *Server, req: jsonrpc.Request) !void {
+        if (self.initialization_state == .initialized) {
+            try self.sendError(jsonrpc.Error.invalidParams(req.id, "Already initialized"));
+            return;
+        }
+
+        const params = req.params orelse {
+            try self.sendError(jsonrpc.Error.invalidParams(req.id, "Missing initialize params"));
+            return;
+        };
+        const obj = switch (params) {
+            .object => |o| o,
+            else => {
+                try self.sendError(jsonrpc.Error.invalidParams(req.id, "initialize params must be an object"));
+                return;
+            },
+        };
+
+        const pv_val = obj.get("protocolVersion") orelse {
+            try self.sendError(jsonrpc.Error.invalidParams(req.id, "Missing protocolVersion"));
+            return;
+        };
+        const requested_version = switch (pv_val) {
+            .string => |s| s,
+            else => {
+                try self.sendError(jsonrpc.Error.invalidParams(req.id, "protocolVersion must be a string"));
+                return;
+            },
+        };
+        if (!isSupportedProtocolVersion(requested_version)) {
+            try self.sendError(jsonrpc.Error.invalidParams(req.id, "Unsupported protocolVersion"));
+            return;
+        }
+
         self.initialization_state = .initializing;
 
-        if (req.params) |params| {
-            if (params == .object) {
-                const obj = params.object;
+        const negotiated = try self.allocator.dupe(u8, requested_version);
+        errdefer self.allocator.free(negotiated);
+        if (self.negotiated_version_owned) |v| self.allocator.free(v);
+        self.negotiated_version_owned = negotiated;
+        self.negotiated_version = negotiated;
 
-                // Parse protocolVersion
-                if (obj.get("protocolVersion")) |pv_val| {
-                    if (pv_val == .string) {
-                        const pv = try self.allocator.dupe(u8, pv_val.string);
-                        if (self.negotiated_version_owned) |v| self.allocator.free(v);
-                        self.negotiated_version_owned = pv;
-                        self.negotiated_version = pv;
-                    }
-                }
-
-                // Parse clientInfo
-                if (obj.get("clientInfo")) |ci_val| {
-                    if (ci_val == .object) {
-                        const ci_obj = ci_val.object;
-                        if (ci_obj.get("name")) |name_val| {
-                            if (ci_obj.get("version")) |version_val| {
-                                if (name_val == .string and version_val == .string) {
-                                    if (self.client_info_owned) {
-                                        if (self.client_info) |old| freeImplementation(self.allocator, old);
-                                    }
-                                    const name = try self.allocator.dupe(u8, name_val.string);
-                                    errdefer self.allocator.free(name);
-                                    const version = try self.allocator.dupe(u8, version_val.string);
-                                    errdefer self.allocator.free(version);
-                                    const title: ?[]u8 = if (ci_obj.get("title")) |tv| switch (tv) {
-                                        .string => |s| try self.allocator.dupe(u8, s),
-                                        else => null,
-                                    } else null;
-                                    errdefer if (title) |t| self.allocator.free(t);
-                                    self.client_info = .{
-                                        .name = name,
-                                        .version = version,
-                                        .title = title,
-                                    };
-                                    self.client_info_owned = true;
-                                }
+        // Parse clientInfo
+        if (obj.get("clientInfo")) |ci_val| {
+            if (ci_val == .object) {
+                const ci_obj = ci_val.object;
+                if (ci_obj.get("name")) |name_val| {
+                    if (ci_obj.get("version")) |version_val| {
+                        if (name_val == .string and version_val == .string) {
+                            if (self.client_info_owned) {
+                                if (self.client_info) |old| freeImplementation(self.allocator, old);
                             }
+                            const name = try self.allocator.dupe(u8, name_val.string);
+                            errdefer self.allocator.free(name);
+                            const version = try self.allocator.dupe(u8, version_val.string);
+                            errdefer self.allocator.free(version);
+                            const title: ?[]u8 = if (ci_obj.get("title")) |tv| switch (tv) {
+                                .string => |s| try self.allocator.dupe(u8, s),
+                                else => null,
+                            } else null;
+                            errdefer if (title) |t| self.allocator.free(t);
+                            self.client_info = .{
+                                .name = name,
+                                .version = version,
+                                .title = title,
+                            };
+                            self.client_info_owned = true;
                         }
                     }
                 }
+            }
+        }
 
-                // Parse capabilities
-                if (obj.get("capabilities")) |caps_val| {
-                    if (caps_val == .object) {
-                        const caps_obj = caps_val.object;
-                        var caps: types.ClientCapabilities = .{};
-                        if (caps_obj.get("roots")) |roots_val| {
-                            if (roots_val == .object) {
-                                const roots_obj = roots_val.object;
-                                caps.roots = .{
-                                    .list_changed = if (roots_obj.get("listChanged")) |lc| switch (lc) {
-                                        .bool => |b| b,
-                                        else => false,
-                                    } else false,
-                                };
-                            }
-                        }
-                        if (caps_obj.get("sampling") != null) {
-                            caps.sampling = .{};
-                        }
-                        if (caps_obj.get("elicitation") != null) {
-                            caps.elicitation = .{};
-                        }
-                        self.client_capabilities = caps;
+        // Parse capabilities
+        if (obj.get("capabilities")) |caps_val| {
+            if (caps_val == .object) {
+                const caps_obj = caps_val.object;
+                var caps: types.ClientCapabilities = .{};
+                if (caps_obj.get("roots")) |roots_val| {
+                    if (roots_val == .object) {
+                        const roots_obj = roots_val.object;
+                        caps.roots = .{
+                            .list_changed = if (roots_obj.get("listChanged")) |lc| switch (lc) {
+                                .bool => |b| b,
+                                else => false,
+                            } else false,
+                        };
                     }
                 }
+                if (caps_obj.get("sampling") != null) {
+                    caps.sampling = .{};
+                }
+                if (caps_obj.get("elicitation") != null) {
+                    caps.elicitation = .{};
+                }
+                self.client_capabilities = caps;
             }
         }
 
@@ -462,6 +488,11 @@ pub const Server = struct {
         };
 
         try self.sendResult(req.id, result);
+    }
+
+    fn isSupportedProtocolVersion(version: []const u8) bool {
+        return std.mem.eql(u8, version, types.DEFAULT_NEGOTIATED_VERSION) or
+            std.mem.eql(u8, version, types.LATEST_PROTOCOL_VERSION);
     }
 
     const WireRoot = struct {
@@ -1346,6 +1377,58 @@ test "Server initialize advertises tasks capability for protocol version 2025-11
 
     const output = buffered.getOutput();
     try std.testing.expect(std.mem.indexOf(u8, output, "\"tasks\"") != null);
+}
+
+test "Server rejects requests before initialize" {
+    var tio: TestIo = undefined;
+    tio.init(std.testing.allocator);
+    defer tio.deinit();
+    const io = tio.io;
+
+    var buffered = transport_mod.BufferedTransport.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    var server = Server.init(
+        std.testing.allocator,
+        .{ .name = "test-server", .version = "1.0.0" },
+        buffered.asTransport(),
+    );
+    defer server.deinit();
+    server.io = io;
+
+    try buffered.setInput("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n");
+    const msg = try buffered.asTransport().read(io, std.testing.allocator) orelse unreachable;
+    defer jsonrpc.Message.freeMessage(std.testing.allocator, msg);
+    try server.handleMessage(io, msg);
+
+    const output = buffered.getOutput();
+    try std.testing.expect(std.mem.indexOf(u8, output, "Server not initialized") != null);
+}
+
+test "Server rejects unsupported initialize protocolVersion" {
+    var tio: TestIo = undefined;
+    tio.init(std.testing.allocator);
+    defer tio.deinit();
+    const io = tio.io;
+
+    var buffered = transport_mod.BufferedTransport.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    var server = Server.init(
+        std.testing.allocator,
+        .{ .name = "test-server", .version = "1.0.0" },
+        buffered.asTransport(),
+    );
+    defer server.deinit();
+    server.io = io;
+
+    try buffered.setInput("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2099-01-01\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1.0\"}}}\n");
+    const msg = try buffered.asTransport().read(io, std.testing.allocator) orelse unreachable;
+    defer jsonrpc.Message.freeMessage(std.testing.allocator, msg);
+    try server.handleMessage(io, msg);
+
+    const output = buffered.getOutput();
+    try std.testing.expect(std.mem.indexOf(u8, output, "Unsupported protocolVersion") != null);
 }
 
 test "Server logging/setLevel updates min log level" {

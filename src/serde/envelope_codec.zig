@@ -248,9 +248,9 @@ test "encode error with data field" {
     const allocator = std.testing.allocator;
     const id = jsonrpc.RequestId{ .string = "req-abc" };
 
-    var data_obj = std.json.ObjectMap.init(allocator);
-    defer data_obj.deinit();
-    try data_obj.put("field", std.json.Value{ .string = "value" });
+    var data_obj = try std.json.ObjectMap.init(allocator, &.{}, &.{});
+    defer data_obj.deinit(allocator);
+    try data_obj.put(allocator, "field", std.json.Value{ .string = "value" });
 
     const err_data = jsonrpc.ErrorData{
         .code = .invalid_params,

@@ -2,11 +2,11 @@
     .name = .mzp,
     .version = "0.1.0",
     .fingerprint = 0x3a9b61211511c8cd, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.16.0-dev.2349+204fa8959",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .zjema = .{
             .url = "https://github.com/kaid/zjema/archive/refs/heads/trunk.tar.gz",
-            .hash = "zjema-0.16.0-dev.2637+6a9510c0e-8vMphtCSAQC-zLXjy-M2V4YX-57e4iWxYeR6zQQwf6Zi",
+            .hash = "zjema-0.0.0-8vMphk-WAQD6gfEifCLkh3Fnp83clJ6sApZtomDR5_od",
         },
     },
     .paths = .{

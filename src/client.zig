@@ -34,8 +34,6 @@ pub const Client = struct {
     server_instructions_owned: bool = false,
     roots: std.ArrayList(types.Root) = .empty,
 
-    ts_allocator: std.heap.ThreadSafeAllocator = undefined,
-    ts_allocator_inited: bool = false,
     io: ?std.Io = null,
     io_mutex: std.Io.Mutex = .init,
 
@@ -65,22 +63,10 @@ pub const Client = struct {
         if (self.pending_inited) self.pending.deinit();
     }
 
-    fn getAllocator(self: *Client) std.mem.Allocator {
-        if (!self.ts_allocator_inited) {
-            // Return the raw allocator if ThreadSafeAllocator is not initialized yet
-            return self.allocator;
-        }
-        return (&self.ts_allocator).allocator();
-    }
-
     pub fn run(self: *Client, io: std.Io) anyerror!void {
         self.io = io;
-        if (!self.ts_allocator_inited) {
-            self.ts_allocator = .{ .child_allocator = self.allocator, .io = io };
-            self.ts_allocator_inited = true;
-        }
         if (!self.pending_inited) {
-            self.pending = pending_mod.PendingRegistry.init(self.getAllocator());
+            self.pending = pending_mod.PendingRegistry.init(self.allocator);
             self.pending_inited = true;
         }
         self.run_error_mutex.lockUncancelable(io);
@@ -110,7 +96,7 @@ pub const Client = struct {
 
     fn readerMain(self: *Client) void {
         const io = self.io orelse return;
-        const a = self.getAllocator();
+        const a = self.allocator;
 
         while (true) {
             const msg_opt = self.transport.read(io, a) catch |err| {
@@ -167,7 +153,7 @@ pub const Client = struct {
 
     fn dispatcherMain(self: *Client) void {
         const io = self.io orelse return;
-        const a = self.getAllocator();
+        const a = self.allocator;
 
         while (true) {
             const msg_ptr = self.inbound_queue.getOne(io) catch |err| switch (err) {
@@ -203,7 +189,7 @@ pub const Client = struct {
         };
 
         const result_value = try self.requestRaw("initialize", params, null);
-        defer jsonrpc.Message.freeValue(self.getAllocator(), result_value);
+        defer jsonrpc.Message.freeValue(self.allocator, result_value);
 
         // Parse result using std.json directly to avoid memory issues in mapper-based decode
         const result = try parseInitializeResult(self.allocator, result_value);
@@ -220,7 +206,7 @@ pub const Client = struct {
 
     pub fn ping(self: *Client) !void {
         const result = try self.requestRaw("ping", null, null);
-        defer jsonrpc.Message.freeValue(self.getAllocator(), result);
+        defer jsonrpc.Message.freeValue(self.allocator, result);
     }
 
     pub fn newNumericId(self: *Client) jsonrpc.RequestId {
@@ -247,7 +233,7 @@ pub const Client = struct {
         timeout: ?Io.Clock.Duration,
     ) !Resp {
         const result_value = try self.requestRaw(method, params, timeout);
-        defer jsonrpc.Message.freeValue(self.getAllocator(), result_value);
+        defer jsonrpc.Message.freeValue(self.allocator, result_value);
         return try typed_codec.valueToTyped(arena, Resp, RespMapper, result_value);
     }
 
@@ -314,12 +300,12 @@ pub const Client = struct {
     fn sendRequestWithIdTimeout(self: *Client, id: jsonrpc.RequestId, method: []const u8, params: anytype, timeout: ?Io.Clock.Duration) !json.Value {
         const io = self.io orelse return error.IoNotSet;
         if (!self.pending_inited) {
-            self.pending = pending_mod.PendingRegistry.init(self.getAllocator());
+            self.pending = pending_mod.PendingRegistry.init(self.allocator);
             self.pending_inited = true;
         }
         const borrowed_id = pending_mod.PendingRegistry.borrowedIdFromRequestId(id);
         const shared = try self.pending.register(io, borrowed_id);
-        defer shared.release(self.getAllocator(), io);
+        defer shared.release(self.allocator, io);
         errdefer self.pending.abandon(io, borrowed_id);
 
         self.io_mutex.lockUncancelable(io);
@@ -632,6 +618,34 @@ fn parseInitializeResult(allocator: std.mem.Allocator, value: json.Value) !types
             if (caps_obj.get("logging") != null) {
                 capabilities.logging = .{};
             }
+            if (caps_obj.get("tasks")) |tasks_val| {
+                if (tasks_val == .object) {
+                    const tasks_obj = tasks_val.object;
+                    var task_caps: types.TasksCapability = .{};
+                    if (tasks_obj.get("list") != null) {
+                        task_caps.list = .{};
+                    }
+                    if (tasks_obj.get("cancel") != null) {
+                        task_caps.cancel = .{};
+                    }
+                    if (tasks_obj.get("requests")) |reqs_val| {
+                        if (reqs_val == .object) {
+                            const reqs_obj = reqs_val.object;
+                            var req_caps: types.TasksRequestsCapability = .{};
+                            if (reqs_obj.get("tools")) |tools_val| {
+                                if (tools_val == .object) {
+                                    const tools_obj = tools_val.object;
+                                    if (tools_obj.get("call") != null) {
+                                        req_caps.tools = .{ .call = .{} };
+                                    }
+                                }
+                            }
+                            task_caps.requests = req_caps;
+                        }
+                    }
+                    capabilities.tasks = task_caps;
+                }
+            }
         }
     }
 
@@ -869,6 +883,68 @@ test "Client initialize sends roots capability with listChanged" {
 
     try run_future.await(io);
     server_thread.join();
+}
+
+test "Client initialize parses tasks capability" {
+    var tio: TestIo = undefined;
+    tio.init(std.testing.allocator);
+    defer tio.deinit();
+    const io = tio.io;
+
+    var duplex: transport_mod.DuplexTransport = undefined;
+    duplex.init(std.testing.allocator);
+    defer duplex.deinit(io);
+
+    var client = Client.init(
+        std.testing.allocator,
+        .{ .name = "test-client", .version = "1.0.0" },
+        duplex.endpointA().asTransport(),
+    );
+    defer client.deinit();
+    client.io = io;
+
+    const FakeServer = struct {
+        fn run(ep: *transport_mod.DuplexTransport.Endpoint, io2: std.Io) !void {
+            const msg = (try ep.asTransport().read(io2, std.testing.allocator)) orelse return;
+            defer jsonrpc.Message.freeMessage(std.testing.allocator, msg);
+
+            const req = switch (msg) {
+                .request => |r| r,
+                else => return error.UnexpectedToken,
+            };
+            const id_num = switch (req.id) {
+                .number => |n| n,
+                .string => return error.UnexpectedToken,
+            };
+
+            const response = try std.fmt.allocPrint(
+                std.testing.allocator,
+                "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{{\"tasks\":{{\"list\":{{}},\"cancel\":{{}},\"requests\":{{\"tools\":{{\"call\":{{}}}}}}}}}},\"serverInfo\":{{\"name\":\"srv\",\"version\":\"1.2.3\"}}}}}}",
+                .{id_num},
+            );
+            defer std.testing.allocator.free(response);
+            try ep.asTransport().write(io2, response);
+
+            const initialized_msg = (try ep.asTransport().read(io2, std.testing.allocator)) orelse return;
+            defer jsonrpc.Message.freeMessage(std.testing.allocator, initialized_msg);
+            ep.asTransport().close(io2);
+        }
+    };
+
+    var run_future = try std.Io.concurrent(io, Client.run, .{ &client, io });
+    var srv_future = try std.Io.concurrent(io, FakeServer.run, .{ duplex.endpointB(), io });
+
+    const result = try client.initialize();
+
+    try std.testing.expect(result.capabilities.tasks != null);
+    try std.testing.expect(result.capabilities.tasks.?.list != null);
+    try std.testing.expect(result.capabilities.tasks.?.cancel != null);
+    try std.testing.expect(result.capabilities.tasks.?.requests != null);
+    try std.testing.expect(result.capabilities.tasks.?.requests.?.tools != null);
+    try std.testing.expect(result.capabilities.tasks.?.requests.?.tools.?.call != null);
+
+    try srv_future.await(io);
+    try run_future.await(io);
 }
 
 test "Client responds to roots/list while waiting for response" {

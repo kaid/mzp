@@ -339,10 +339,10 @@ pub const RawMessage = union(enum) {
                 return .{ .array = new_arr };
             },
             .object => |obj| {
-                var new_obj = json.ObjectMap.init(allocator);
+                var new_obj = try json.ObjectMap.init(allocator, &.{}, &.{});
                 var it = obj.iterator();
                 while (it.next()) |entry| {
-                    try new_obj.put(try allocator.dupe(u8, entry.key_ptr.*), try cloneValue(allocator, entry.value_ptr.*));
+                    try new_obj.put(allocator, try allocator.dupe(u8, entry.key_ptr.*), try cloneValue(allocator, entry.value_ptr.*));
                 }
                 return .{ .object = new_obj };
             },
@@ -367,7 +367,7 @@ pub const RawMessage = union(enum) {
                     freeValue(allocator, entry.value_ptr.*);
                 }
                 var mut_obj = obj;
-                mut_obj.deinit();
+                mut_obj.deinit(allocator);
             },
             else => {},
         }
